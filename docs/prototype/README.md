@@ -72,26 +72,12 @@ tests/e2e/   behavior tests driven through the CLI and Workspace paths
 bench/       fixture generator and benchmark harness
 ```
 
-## Platforms
+## Platform
 
-The adapter speaks the FUSE 2.x API, so the prototype builds, mounts and runs
-its full test suite on both:
-
-| | Backend | Install |
-| --- | --- | --- |
-| macOS | macFUSE | `brew install --cask macfuse` |
-| Linux | libfuse 2.x | `apt-get install libfuse-dev` |
-
-Three things differ, each behind an `__APPLE__` guard: the extended-attribute
-callbacks take an extra offset on macFUSE, `volname` and `noappledouble` are
-macFUSE-only mount options, and Linux unmounts through `fusermount -u`.
-
-macOS with macFUSE is the platform whose measurements decide issue #1; Linux
-numbers are reported separately and never substituted for it. See
-`docs/adr/0003-prototype-runs-on-macos-and-linux.md`, which reopens the issue's
-out-of-scope list. FUSE 3 is not supported: libfuse 3 does not offer the FUSE 2
-API. The macFUSE FSKit backend is deliberately unused, since its current feature
-and performance differences would confound the verdict.
+This issue #1 prototype supports macOS only.
+CMake rejects other operating systems so that development convenience cannot silently widen the experiment's specified scope.
+The adapter uses the FUSE 2.x API provided by macFUSE's kernel backend.
+The macFUSE FSKit backend is deliberately unused because its feature and performance differences would confound the verdict.
 
 ## Running on macOS
 
@@ -125,7 +111,7 @@ were skipped.
 
 ## Build
 
-Requires C++23, CMake, Ninja, SQLite and one of the FUSE backends above.
+Requires macOS, C++23, CMake, Ninja, SQLite and macFUSE.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -184,6 +170,10 @@ Base-state capture time is reported separately from Workspace creation time, and
 physical reclamation and the storage a removed Workspace still holds are
 reported separately from logical removal.
 
+The harness requires at least five lifecycle samples and three clean build and test samples.
+It refuses to pass a fixture smaller than 100,000 entries or roughly 2 GiB.
+Storage gates use allocated backing-store bytes rather than logical file sizes.
+
 The run drives the correctness suite itself and evaluates every gate issue #1
 decides on. A gate with no measurement behind it fails, so a run whose
 mounted-path tests or cases were skipped reports FAIL rather than PASS.
@@ -201,8 +191,7 @@ mounted-path tests or cases were skipped reports FAIL rather than PASS.
   no working cache-invalidation call for the high-level API.
 - A Workspace keeps its branch when it is removed, so re-using the name later
   needs the branch dealt with first.
-- No Windows, FSKit, FUSE 3, chunk-level deduplication, content addressing,
-  compression or garbage collection.
+- No Linux, Windows, FSKit, FUSE 3, chunk-level deduplication, content addressing, compression or garbage collection.
 
 ## Terminology gap
 

@@ -20,3 +20,7 @@ foreach(script IN LISTS TRIBIOS_TEST_SCRIPTS)
                    bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/${script}.sh)
   set_tests_properties(${script} PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
 endforeach()
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME benchmark_harness
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark_harness.py)

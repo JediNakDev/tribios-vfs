@@ -1,6 +1,5 @@
-// The only operating-system specific file: FUSE callbacks in, Workspace engine
-// calls out. No filesystem policy lives here. It speaks the FUSE 2.x API, which
-// macFUSE implements on macOS and libfuse on Linux.
+// The only operating-system specific file: macFUSE callbacks in, Workspace
+// engine calls out. No filesystem policy lives here.
 #define FUSE_USE_VERSION 26
 
 #include "fuse/fuse_adapter.hpp"
@@ -244,15 +243,9 @@ int tri_mknod(const char* path, mode_t mode, dev_t) {
 }
 
 // Unsupported semantics fail explicitly rather than silently misbehaving.
-// macFUSE passes an extra offset to the xattr calls; Linux libfuse does not.
 int tri_link(const char*, const char*) { return -ENOTSUP; }
-#ifdef __APPLE__
 int tri_setxattr(const char*, const char*, const char*, size_t, int, uint32_t) { return -ENOTSUP; }
 int tri_getxattr(const char*, const char*, char*, size_t, uint32_t) { return -ENOTSUP; }
-#else
-int tri_setxattr(const char*, const char*, const char*, size_t, int) { return -ENOTSUP; }
-int tri_getxattr(const char*, const char*, char*, size_t) { return -ENOTSUP; }
-#endif
 int tri_listxattr(const char*, char*, size_t) { return -ENOTSUP; }
 int tri_removexattr(const char*, const char*) { return -ENOTSUP; }
 int tri_lock(const char*, struct fuse_file_info*, int, struct flock*) { return -ENOTSUP; }
@@ -306,10 +299,8 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
   // behind one another. default_permissions has the kernel enforce the modes
   // the engine reports, so permission changes behave like the host filesystem.
   std::vector<std::string> arguments{"tribios", mount_point.string(), "-f", "-o",
-                                     "default_permissions"};
-#ifdef __APPLE__
-  arguments.insert(arguments.end(), {"-o", "volname=Tribios", "-o", "noappledouble"});
-#endif
+                                     "default_permissions", "-o", "volname=Tribios", "-o",
+                                     "noappledouble"};
   if (debug) arguments.push_back("-d");
   std::vector<char*> argv;
   for (auto& argument : arguments) argv.push_back(const_cast<char*>(argument.c_str()));
@@ -322,16 +313,9 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
 }
 
 void request_unmount(const std::filesystem::path& mount_point) {
-#ifdef __APPLE__
   if (!run_process_and_capture_output({"umount", mount_point.string()}).ok()) {
     run_process_and_capture_output({"diskutil", "unmount", "force", mount_point.string()});
   }
-#else
-  // An unprivileged Linux user unmounts through fusermount.
-  if (!run_process_and_capture_output({"fusermount", "-u", mount_point.string()}).ok()) {
-    run_process_and_capture_output({"umount", mount_point.string()});
-  }
-#endif
 }
 
 }  // namespace tribios

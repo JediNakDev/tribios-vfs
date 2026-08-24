@@ -41,6 +41,8 @@ The prototype passes only if every gate below passes.
 Base-state capture time is reported separately and is not part of the creation
 gate. Physical reclamation time and transient storage are measured and reported
 but are not included in logical removal latency.
+Storage measurements use allocated backing-store bytes, including the upper tree's private metadata file.
+The harness requires at least five lifecycle samples and three build and test samples.
 
 ## Environment
 
@@ -61,25 +63,6 @@ Fill in from the `environment` block of the results file.
 
 Attach `bench/results/latest.json` and the `ctest` output.
 
-## Preliminary observations
-
-Not the verdict. These come from Linux with libfuse 2.9.9 on small fixtures,
-recorded only to say where the risk sits before the real runs on macOS. The
-prototype supports both platforms, but issue #1 is decided on macOS with
-macFUSE and the 100,000-file fixture.
-
-- The correctness suite passes in full against a live mount, including the
-  primary end-to-end test: two Workspaces from one Base state, independent
-  mutation, CMake and Ninja builds, `ctest`, a daemon restart, independent
-  commits and removal.
-- Logical removal is comfortably faster than the full-copy baseline.
-- An untouched Workspace holds a negligible fraction of the Base state.
-- `git status` was around 3x the full-copy baseline on a 300-file fixture,
-  against a 1.5x gate. Per-operation FUSE overhead is the thing to watch, and
-  the 100,000-file fixture on macFUSE is what decides it.
-
 ## Verdict
 
-State PASS or FAIL, name every gate that failed, and record what the evidence
-implies for the production design. The prototype code itself is not carried
-forward.
+Pending the recorded macOS benchmark run.
