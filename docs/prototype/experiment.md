@@ -43,6 +43,7 @@ gate. Physical reclamation time and transient storage are measured and reported
 but are not included in logical removal latency.
 Storage measurements use allocated backing-store bytes, including the upper tree's private metadata file.
 The harness requires at least five lifecycle samples and three build and test samples.
+It also requires enough free scratch space for eight full-copy baselines plus a 1 GiB safety margin.
 
 ## Environment
 

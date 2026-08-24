@@ -82,6 +82,25 @@ class BenchmarkHarnessTest(unittest.TestCase):
 
             self.assertGreaterEqual(benchmark.allocated_bytes(Path(directory)), 512)
 
+    def test_space_requirement_excludes_tribios_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "source").write_bytes(b"x")
+            (project / ".tribios").mkdir()
+            (project / ".tribios" / "base").write_bytes(b"x" * 8192)
+
+            requirement = benchmark.benchmark_space_requirement(project)
+
+            self.assertEqual(
+                benchmark.allocated_bytes(project, excluded_top_level={".tribios"}),
+                requirement["full_copy_physical_bytes"],
+            )
+            self.assertEqual(
+                requirement["full_copy_physical_bytes"] * benchmark.CONCURRENT_WORKSPACES
+                + benchmark.FREE_SPACE_SAFETY_BYTES,
+                requirement["required_free_bytes"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

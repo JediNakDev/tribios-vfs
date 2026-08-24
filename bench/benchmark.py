@@ -30,6 +30,8 @@ GATES = {
 }
 MINIMUM_FIXTURE_FILES = 100_000
 MINIMUM_FIXTURE_BYTES = int(1.9 * 1024**3)
+CONCURRENT_WORKSPACES = 8
+FREE_SPACE_SAFETY_BYTES = 1024**3
 
 # Every gate issue #1 decides on. A gate with no measurement behind it fails, so
 # a run with a failed or skipped correctness suite, or with the mounted-path
@@ -66,15 +68,25 @@ def summarize(samples):
     }
 
 
-def allocated_bytes(path: Path) -> int:
+def allocated_bytes(path: Path, excluded_top_level=()) -> int:
     total = 0
     for current, directories, files in os.walk(path):
+        if Path(current) == path:
+            directories[:] = [name for name in directories if name not in excluded_top_level]
         for name in directories + files:
             try:
                 total += os.lstat(os.path.join(current, name)).st_blocks * 512
             except OSError:
                 pass
     return total
+
+
+def benchmark_space_requirement(project: Path):
+    full_copy_bytes = allocated_bytes(project, excluded_top_level={".tribios"})
+    return {
+        "full_copy_physical_bytes": full_copy_bytes,
+        "required_free_bytes": full_copy_bytes * CONCURRENT_WORKSPACES + FREE_SPACE_SAFETY_BYTES,
+    }
 
 
 def regular_file_count(path: Path) -> int:
@@ -460,6 +472,14 @@ def main() -> int:
     scratch.mkdir(parents=True, exist_ok=True)
     harness = Harness(Path(arguments.cli), Path(arguments.project).resolve(), scratch)
 
+    space = benchmark_space_requirement(Path(arguments.project).resolve())
+    space["available_free_bytes"] = shutil.disk_usage(scratch).free
+    if space["available_free_bytes"] < space["required_free_bytes"]:
+        parser.error(
+            "insufficient scratch space for eight concurrent full copies: "
+            f"need {space['required_free_bytes']} free bytes, "
+            f"have {space['available_free_bytes']}")
+
     base_state = {
         line.split(": ", 1)[0]: line.split(": ", 1)[1]
         for line in harness.tribios("info").splitlines() if ": " in line
@@ -467,6 +487,7 @@ def main() -> int:
     base_state["base regular files"] = str(
         regular_file_count(Path(arguments.project).resolve() / ".tribios" / "base"))
     harness.results["base_state"] = base_state
+    harness.results["space_preflight"] = space
     harness.case_correctness(Path(arguments.build_directory))
     harness.case_lifecycle(arguments.repetitions, concurrency=1)
     harness.case_lifecycle(arguments.repetitions, concurrency=8)

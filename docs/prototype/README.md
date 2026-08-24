@@ -173,6 +173,7 @@ reported separately from logical removal.
 The harness requires at least five lifecycle samples and three clean build and test samples.
 It refuses to pass a fixture smaller than 100,000 entries or roughly 2 GiB.
 Storage gates use allocated backing-store bytes rather than logical file sizes.
+Before timing, the harness verifies that the scratch filesystem can hold eight full-copy baselines plus a 1 GiB safety margin.
 
 The run drives the correctness suite itself and evaluates every gate issue #1
 decides on. A gate with no measurement behind it fails, so a run whose
