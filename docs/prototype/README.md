@@ -64,7 +64,6 @@ gates and the results template.
 ## Layout
 
 ```text
-includes/    public headers, grouped by component
 src/core/    Workspace engine, Base-state capture, metadata store, lifecycle
 src/fuse/    the FUSE adapter — the only operating-system specific code
 src/daemon/  long-running daemon and its Unix-domain control interface
@@ -173,21 +172,21 @@ need real tools against real paths report as skipped.
 python3 bench/generate_fixture.py /tmp/fixture          # ~100k files, ~2 GiB
 build/tribios configure /tmp/fixture
 build/tribios --project /tmp/fixture daemon start
-ctest --test-dir build --output-on-failure       # the benchmark needs this result
 python3 bench/benchmark.py --cli build/tribios --project /tmp/fixture \
-    --scratch /tmp/bench-scratch --correctness-suite passed \
+    --scratch /tmp/bench-scratch --build-directory build \
     --output bench/results/latest.json
 ```
-
-A run only reports PASS when every gate produced a measurement and the
-correctness suite passed. A build with no FUSE backend cannot measure the
-mounted-path gates, so it reports which ones are missing and FAILs.
 
 The baseline is an equivalent full directory copy reproducing the same Workspace
 contents, including ignored and untracked data. Each timed case reports raw
 samples, median and p95, at one Workspace and at eight concurrent Workspaces.
 Base-state capture time is reported separately from Workspace creation time, and
-physical reclamation is reported separately from logical removal.
+physical reclamation and the storage a removed Workspace still holds are
+reported separately from logical removal.
+
+The run drives the correctness suite itself and evaluates every gate issue #1
+decides on. A gate with no measurement behind it fails, so a run whose
+mounted-path tests or cases were skipped reports FAIL rather than PASS.
 
 ## Deliberate limits of this prototype
 

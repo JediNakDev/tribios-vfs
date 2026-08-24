@@ -320,7 +320,7 @@ int command_fs(const Options& options) {
 }
 
 int command_upper_bytes(const Options& options) {
-  if (options.positional.size() < 2) return report_error("stats needs a workspace");
+  if (options.positional.size() < 2) return report_error("upper-bytes needs a workspace");
   auto project = resolve_configured_project_root(options);
   if (!project) return report_error(project.error());
   const auto paths = tribios::ProjectPaths::from_project_root(*project);

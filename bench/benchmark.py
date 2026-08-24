@@ -4,8 +4,10 @@
 THROWAWAY PROTOTYPE - see docs/prototype/README.md.
 
 Every timed case reports raw samples, median and p95. Base-state capture time is
-reported separately from Workspace creation time, and physical reclamation is
-reported separately from logical removal.
+reported separately from Workspace creation time, and physical reclamation and
+the storage a removed Workspace still holds are reported separately from logical
+removal. The run also drives the correctness suite, because issue #1 decides the
+verdict on correctness and performance together.
 """
 
 import argparse
@@ -16,7 +18,6 @@ import platform
 import shutil
 import statistics
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -24,24 +25,21 @@ GATES = {
     "workspace_create_speedup": 10.0,
     "logical_remove_speedup": 10.0,
     "untouched_storage_fraction": 0.01,
+    "mutated_storage_overhead_fraction": 0.05,
     "runtime_ratio": 1.5,
-    # "approximately the copied-up file sizes plus measured metadata overhead"
-    "mutated_storage_overhead": 1.10,
 }
 
-# Every gate issue #1 decides on. A run missing any of them is incomplete, not a
-# pass: skipped mounted cases must never read as PASS.
-REQUIRED_GATES = [
-    "create_speedup_concurrency_1",
-    "create_speedup_concurrency_8",
-    "logical_remove_speedup_concurrency_1",
-    "logical_remove_speedup_concurrency_8",
-    "git_status_ratio_concurrency_1",
-    "git_status_ratio_concurrency_8",
-    "build_ratio_concurrency_1",
-    "build_ratio_concurrency_8",
+# Every gate issue #1 decides on. A gate with no measurement behind it fails, so
+# a run with a failed or skipped correctness suite, or with the mounted-path
+# cases missing, can never report PASS.
+REQUIRED_GATE_NAMES = [
+    "correctness_suite",
     "untouched_storage_fraction",
     "mutated_storage_overhead",
+] + [
+    f"{gate}_concurrency_{concurrency}"
+    for concurrency in (1, 8)
+    for gate in ("create_speedup", "logical_remove_speedup", "git_status_ratio", "build_ratio")
 ]
 
 
@@ -146,14 +144,29 @@ class Harness:
         self.results[f"full_copy_create_{label}"] = summarize(baseline_copy)
         self.results[f"full_copy_delete_{label}"] = summarize(baseline_delete)
 
+    def case_correctness(self, build_directory: Path):
+        # A skipped mounted-path suite is not a pass: it means the evidence the
+        # verdict needs was never produced.
+        completed = subprocess.run(["ctest", "--test-dir", str(build_directory),
+                                    "--output-on-failure"], capture_output=True, text=True)
+        output = completed.stdout + completed.stderr
+        self.results["correctness"] = {
+            "exit_code": completed.returncode,
+            "failed_tests": output.count("***Failed"),
+            "skipped_tests": output.count("***Skipped"),
+        }
+
     def case_reclamation(self, repetitions: int):
-        # Physical reclamation is measured but never folded into logical removal.
+        # Physical reclamation, and the storage a logically removed Workspace
+        # still holds until it finishes, are measured but never folded into
+        # logical removal.
         reclaim_samples, transient_samples = [], []
         for repetition in range(repetitions):
             name = f"reclaim-probe-{repetition}"
             self.tribios("workspace", "create", name)
             self.tribios("fs", "write", name, "src/module0000/file000000.cpp", "x" * 4096, "0")
-            # Transient storage is what reclamation has to free, read before it starts.
+            # Reading the upper tree before removal, not after, keeps the
+            # transient figure off the race with the reclaiming thread.
             transient_samples.append(int(self.tribios("upper-bytes", name).strip()))
             self.tribios("workspace", "remove", name)
             self.tribios("workspace", "wait-reclaim")
@@ -161,9 +174,13 @@ class Harness:
                 fields = line.split("\t")
                 if fields[0] == name:
                     reclaim_samples.append(int(fields[5]) / 1000.0)
-
         self.results["physical_reclaim"] = summarize(reclaim_samples)
-        self.results["transient_upper_bytes_at_removal"] = transient_samples
+        # Storage a Workspace still holds when logical removal returns, which
+        # reclamation frees afterwards.
+        self.results["transient_storage"] = {
+            "samples_bytes": transient_samples,
+            "median_bytes": int(statistics.median(transient_samples)),
+        }
 
     def case_storage(self):
         self.tribios("workspace", "create", "storage-untouched")
@@ -197,12 +214,14 @@ class Harness:
             return milliseconds(lambda: run(["git", "-C", str(path), "status", "--porcelain"]))
 
         def build(path: Path) -> float:
-            # Each sample is a full configure and build, so the build directory
-            # from the previous sample has to go first.
+            # Every sample is a build from scratch, so repeated samples measure
+            # the same work rather than an already-built tree.
+            build_directory = path / "build"
+            shutil.rmtree(build_directory, ignore_errors=True)
+
             def compile_project():
-                shutil.rmtree(path / "build", ignore_errors=True)
-                run(["cmake", "-S", str(path), "-B", str(path / "build"), "-G", "Ninja"])
-                run(["ninja", "-C", str(path / "build")])
+                run(["cmake", "-S", str(path), "-B", str(build_directory), "-G", "Ninja"])
+                run(["ninja", "-C", str(build_directory)])
             return milliseconds(compile_project)
 
         # Names are unique per run: a removed Workspace keeps its branch.
@@ -268,55 +287,78 @@ def evaluate(results):
                     "value": round(ratio, 2), "gate": GATES["runtime_ratio"],
                     "pass": ratio <= GATES["runtime_ratio"]}
 
+    correctness = results.get("correctness")
+    if correctness:
+        verdict["correctness_suite"] = {
+            "value": correctness,
+            "gate": "zero failed and zero skipped tests",
+            "pass": correctness["exit_code"] == 0 and correctness["skipped_tests"] == 0}
+
     storage = results.get("storage")
     if storage:
         fraction = storage["untouched_fraction_of_base"]
         verdict["untouched_storage_fraction"] = {
             "value": fraction, "gate": GATES["untouched_storage_fraction"],
             "pass": fraction <= GATES["untouched_storage_fraction"]}
-        # Growth after mutation must be the copied-up bytes plus metadata, not a
-        # copy of anything that was not written to.
-        overhead = storage["mutated_upper_bytes"] / max(storage["expected_copied_up_bytes"], 1)
+        expected = storage["expected_copied_up_bytes"]
+        overhead = (storage["mutated_upper_bytes"] - expected) / max(expected, 1)
         verdict["mutated_storage_overhead"] = {
-            "value": round(overhead, 4), "gate": GATES["mutated_storage_overhead"],
-            "pass": 1.0 <= overhead <= GATES["mutated_storage_overhead"]}
+            "value": round(overhead, 6), "gate": GATES["mutated_storage_overhead_fraction"],
+            "pass": 0 <= overhead <= GATES["mutated_storage_overhead_fraction"]}
+
+    for name in REQUIRED_GATE_NAMES:
+        verdict.setdefault(name, {"value": None, "gate": "measured", "pass": False,
+                                  "note": "not measured in this run"})
     return verdict
 
 
-def first_line_of_command_output(command) -> str:
+def command_output(command) -> str:
     try:
-        return run(command).stdout.strip().splitlines()[0]
-    except (OSError, subprocess.CalledProcessError, IndexError):
+        return run(command).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def first_line(command) -> str:
+    lines = command_output(command).splitlines()
+    return lines[0] if lines else "unavailable"
+
+
+def fuse_version() -> str:
+    for package in ("osxfuse", "fuse", "fuse3"):
+        version = command_output(["pkg-config", "--modversion", package])
+        if version:
+            return f"{package} {version}"
+    return "unavailable"
+
+
+def backing_filesystem(path: Path) -> str:
+    rows = command_output(["df", "-P", str(path)]).splitlines()
+    if len(rows) < 2:
         return "unavailable"
+    device = rows[-1].split()[0]
+    for line in command_output(["mount"]).splitlines():
+        if line.startswith(device + " "):
+            return line
+    return device
 
 
-def backing_filesystem(project: Path) -> str:
-    # BSD df names the filesystem type with -Y, GNU df with -T, and both put the
-    # entry that matters under a header line.
-    flag = "-Y" if sys.platform == "darwin" else "-T"
-    try:
-        return run(["df", flag, str(project)]).stdout.strip().splitlines()[-1]
-    except (OSError, subprocess.CalledProcessError, IndexError):
-        return "unavailable"
-
-
-def environment(project: Path):
-    fuse_package = "osxfuse" if sys.platform == "darwin" else "fuse"
+def environment(project: Path, base_state):
     return {
         "platform": platform.platform(),
         "machine": platform.machine(),
-        "hardware": first_line_of_command_output(["uname", "-a"]),
         "cpu_count": os.cpu_count(),
         "backing_filesystem": backing_filesystem(project),
-        "fuse": first_line_of_command_output(
-            ["pkg-config", "--modversion", fuse_package]),
-        "compiler": first_line_of_command_output(
-            [os.environ.get("CXX", "c++"), "--version"]),
-        "git": first_line_of_command_output(["git", "--version"]),
-        "cmake": first_line_of_command_output(["cmake", "--version"]),
-        "ninja": first_line_of_command_output(["ninja", "--version"]),
-        "commit": first_line_of_command_output(["git", "rev-parse", "HEAD"]),
+        "fuse": fuse_version(),
+        "compiler": first_line(["c++", "--version"]),
         "python": platform.python_version(),
+        "git": first_line(["git", "--version"]),
+        "cmake": first_line(["cmake", "--version"]),
+        "ninja": first_line(["ninja", "--version"]),
+        "commit": command_output(
+            ["git", "-C", str(Path(__file__).resolve().parent.parent), "rev-parse", "HEAD"]),
+        "fixture_files": base_state.get("base entries", "unavailable"),
+        "fixture_bytes": base_state.get("base bytes", "unavailable"),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
 
@@ -326,12 +368,11 @@ def main() -> int:
     parser.add_argument("--cli", required=True, help="path to the tribios CLI")
     parser.add_argument("--project", required=True, help="a configured Project")
     parser.add_argument("--scratch", required=True, help="scratch directory for baselines")
+    parser.add_argument("--build-directory", required=True,
+                        help="build directory the correctness suite runs in")
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--build-repetitions", type=int, default=3,
-                        help="full configure-and-build samples per case")
-    parser.add_argument("--correctness-suite", choices=("passed", "failed", "not-run"),
-                        default="not-run",
-                        help="the ctest result for this build; only `passed` can pass the run")
+                        help="build samples per Workspace, each from a cleared build tree")
     parser.add_argument("--output", default="bench/results/latest.json")
     arguments = parser.parse_args()
 
@@ -339,10 +380,12 @@ def main() -> int:
     scratch.mkdir(parents=True, exist_ok=True)
     harness = Harness(Path(arguments.cli), Path(arguments.project).resolve(), scratch)
 
-    harness.results["base_state"] = {
+    base_state = {
         line.split(": ", 1)[0]: line.split(": ", 1)[1]
         for line in harness.tribios("info").splitlines() if ": " in line
     }
+    harness.results["base_state"] = base_state
+    harness.case_correctness(Path(arguments.build_directory))
     harness.case_lifecycle(arguments.repetitions, concurrency=1)
     harness.case_lifecycle(arguments.repetitions, concurrency=8)
     harness.case_reclamation(arguments.repetitions)
@@ -353,25 +396,16 @@ def main() -> int:
                          concurrency=8)
 
     report = {
-        "environment": environment(Path(arguments.project).resolve()),
+        "environment": environment(Path(arguments.project).resolve(), base_state),
         "results": harness.results,
         "verdict": evaluate(harness.results),
     }
-    report["missing_gates"] = [gate for gate in REQUIRED_GATES
-                               if gate not in report["verdict"]]
-    report["correctness_suite"] = arguments.correctness_suite
-    report["passed"] = (not report["missing_gates"] and
-                        arguments.correctness_suite == "passed" and
-                        all(entry["pass"] for entry in report["verdict"].values()))
+    report["passed"] = all(entry["pass"] for entry in report["verdict"].values())
 
     output = Path(arguments.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report["verdict"], indent=2))
-    if report["missing_gates"]:
-        print("no measurement for: " + ", ".join(report["missing_gates"]))
-    if arguments.correctness_suite != "passed":
-        print(f"correctness suite: {arguments.correctness_suite}")
     print(f"verdict: {'PASS' if report['passed'] else 'FAIL'} (raw results in {output})")
     return 0 if report["passed"] else 1
 
