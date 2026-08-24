@@ -1,16 +1,11 @@
 # Prototype Workspaces as whole-file copy-on-write over an immutable Base state
 
-The prototype for issue #1 resolves Workspace contents by merging one sparse
-per-Workspace upper tree over one immutable, materialized Base state, copying a
-complete file into the upper tree on its first mutation and recording removals
-as persistent tombstones in SQLite.
+The prototype for issue #1 merges one sparse per-Workspace upper tree over one immutable, materialized Base state.
+It copies a complete file into the upper tree on its first mutation and records removals as persistent tombstones in SQLite.
 
-Alternatives considered and rejected for this experiment: chunk-level
-deduplication and a content-addressed store, which add storage machinery the
-verdict does not depend on; and treating the Project source as a live lower
-layer, which would make Workspace behavior track later Project changes and stop
-being reproducible.
+The experiment does not use chunk-level deduplication or a content-addressed store because its verdict does not depend on that storage machinery.
+It also rejects the Project source as a live lower layer because later Project changes would make Workspaces irreproducible.
 
-This decision is scoped to the throwaway prototype. It is evidence for the
-production design, not a commitment to it, and the prototype implementation is
-kept off `main`.
+This decision applies only to the throwaway prototype.
+It provides evidence for the production design but does not commit production to this architecture.
+The prototype implementation stays off `main`.

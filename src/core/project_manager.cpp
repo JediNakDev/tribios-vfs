@@ -180,27 +180,29 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
 }
 
 Outcome<RemoveResult> ProjectManager::remove_workspace(const std::string& name) {
-  const std::int64_t started = steady_clock_microseconds();
+  std::int64_t logical_remove_us = 0;
   {
     std::unique_lock lock(engines_mutex_);
-    if (!engines_.contains(name)) return error("no such active Workspace: " + name);
-    engines_.erase(name);
-  }
+    auto engine = engines_.find(name);
+    if (engine == engines_.end()) return error("no such active Workspace: " + name);
 
-  // The Workspace is inaccessible and its removed state is committed before
-  // this returns. Freeing its upper tree happens afterwards.
-  auto record = store_->load_workspace_record(name);
-  if (!record) return error("no Workspace record for " + name);
-  record->state = WorkspaceState::Removed;
-  record->removed_at = current_unix_time_seconds();
-  record->logical_remove_us = steady_clock_microseconds() - started;
-  record->reclaim_us = -1;
-  if (auto stored = store_->save_workspace_record(*record); !stored) {
-    return std::unexpected(stored.error());
+    const std::int64_t started = steady_clock_microseconds();
+    auto record = store_->load_workspace_record(name);
+    if (!record) return error("no Workspace record for " + name);
+    record->state = WorkspaceState::Removed;
+    record->removed_at = current_unix_time_seconds();
+    logical_remove_us = steady_clock_microseconds() - started;
+    record->logical_remove_us = logical_remove_us;
+    record->reclaim_us = -1;
+    if (auto stored = store_->save_workspace_record(*record); !stored) {
+      return std::unexpected(stored.error());
+    }
+
+    engines_.erase(engine);
   }
 
   start_workspace_reclamation(name);
-  return RemoveResult{name, record->logical_remove_us};
+  return RemoveResult{name, logical_remove_us};
 }
 
 void ProjectManager::start_workspace_reclamation(const std::string& name) {

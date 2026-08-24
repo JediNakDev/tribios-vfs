@@ -81,6 +81,19 @@ def allocated_bytes(path: Path, excluded_top_level=()) -> int:
     return total
 
 
+def allocated_file_bytes(path: Path) -> int:
+    try:
+        return path.stat().st_blocks * 512
+    except FileNotFoundError:
+        return 0
+
+
+def metadata_store_bytes(project: Path) -> int:
+    database = project / ".tribios" / "meta.db"
+    return sum(allocated_file_bytes(Path(str(database) + suffix))
+               for suffix in ("", "-wal", "-shm"))
+
+
 def benchmark_space_requirement(project: Path):
     full_copy_bytes = allocated_bytes(project, excluded_top_level={".tribios"})
     return {
@@ -204,8 +217,9 @@ class Harness:
             name = self.unique_name(f"reclaim-probe-{repetition}")
             self.tribios("workspace", "create", name)
             self.tribios("fs", "write", name, "src/module0000/file000000.cpp", "x" * 4096, "0")
-            # Reading the upper tree before removal, not after, keeps the
-            # transient figure off the race with the reclaiming thread.
+            # The harness has stopped writing, and reclamation has not started,
+            # so this equals storage held at the logical-removal boundary while
+            # keeping the directory walk outside timed removal.
             transient_samples.append(int(self.tribios("upper-bytes", name).strip()))
             self.tribios("workspace", "remove", name)
             self.tribios("workspace", "wait-reclaim")
@@ -222,53 +236,50 @@ class Harness:
         }
 
     def case_storage(self):
+        project = Path(self.project)
         untouched_name = self.unique_name("storage-untouched")
         mutated_name = self.unique_name("storage-mutated")
+        untouched_metadata_before = metadata_store_bytes(project)
         self.tribios("workspace", "create", untouched_name)
         untouched = int(self.tribios("upper-bytes", untouched_name).strip())
-        base_bytes = allocated_bytes(Path(self.project) / ".tribios" / "base")
+        untouched_metadata_after = metadata_store_bytes(project)
+        untouched_metadata_growth = max(
+            0, untouched_metadata_after - untouched_metadata_before)
+        untouched_total = untouched + untouched_metadata_growth
+        base_bytes = allocated_bytes(project / ".tribios" / "base")
 
+        mutated_metadata_before = metadata_store_bytes(project)
         self.tribios("workspace", "create", mutated_name)
         payload = "m" * 65536
-        mutated_files = [f"src/module0000/file{index:06d}.cpp" for index in range(16)]
+        mutated_files = [f"src/module0000/file{index:06d}.cpp" for index in range(64)]
         for path in mutated_files:
             self.tribios("fs", "write", mutated_name, path, payload, "0")
+        for index in range(16):
+            self.tribios("fs", "rm", mutated_name,
+                         f"src/module0001/file{index:06d}.cpp")
         mutated = int(self.tribios("upper-bytes", mutated_name).strip())
+        mutated_metadata_after = metadata_store_bytes(project)
+        mutated_metadata_growth = max(0, mutated_metadata_after - mutated_metadata_before)
+        mutated_total = mutated + mutated_metadata_growth
         allocation_unit = os.statvfs(self.project).f_frsize
         copied_up_bytes = ((len(payload) + allocation_unit - 1) // allocation_unit) * allocation_unit
 
         self.results["storage"] = {
             "base_physical_bytes": base_bytes,
             "untouched_upper_physical_bytes": untouched,
-            "untouched_fraction_of_base": round(untouched / base_bytes, 6) if base_bytes else 0,
+            "untouched_metadata_growth_bytes": untouched_metadata_growth,
+            "untouched_total_physical_bytes": untouched_total,
+            "untouched_fraction_of_base": round(
+                untouched_total / base_bytes, 6) if base_bytes else 0,
             "mutated_upper_physical_bytes": mutated,
+            "mutated_metadata_growth_bytes": mutated_metadata_growth,
+            "mutated_total_physical_bytes": mutated_total,
             "expected_copied_up_physical_bytes": copied_up_bytes * len(mutated_files),
+            "tombstones_created": 16,
             "allocation_unit_bytes": allocation_unit,
         }
 
-    def case_runtime(self, repetitions: int, build_repetitions: int, concurrency: int):
-        if not self.mounted():
-            self.results["runtime"] = {
-                "skipped": "this build has no macFUSE backend, so mounted-path runtime "
-                           "measurements cannot run"
-            }
-            return
-
-        def git_status(path: Path) -> float:
-            return milliseconds(lambda: run(["git", "-C", str(path), "status", "--porcelain"]))
-
-        def build(path: Path) -> float:
-            # Every sample is a build from scratch, so repeated samples measure
-            # the same work rather than an already-built tree.
-            build_directory = path / "build"
-            shutil.rmtree(build_directory, ignore_errors=True)
-
-            def compile_project():
-                run(["cmake", "-S", str(path), "-B", str(build_directory), "-G", "Ninja"])
-                run(["ninja", "-C", str(build_directory)])
-                run(["ctest", "--test-dir", str(build_directory), "--output-on-failure"])
-            return milliseconds(compile_project)
-
+    def prepare_runtime_paths(self, concurrency: int):
         # Names are unique per run: a removed Workspace keeps its branch.
         names = [self.unique_name(f"runtime-{concurrency}-{index}")
                  for index in range(concurrency)]
@@ -283,56 +294,94 @@ class Harness:
             destination.mkdir(parents=True, exist_ok=True)
             self.full_copy(destination)
             baselines.append(destination)
+        return names, paths, baselines
 
-        status_workspace, status_baseline = [], []
+    @staticmethod
+    def measure_parallel(operation, paths, repetitions: int, concurrency: int):
+        samples = []
         for _ in range(repetitions):
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                status_workspace.extend(pool.map(git_status, paths))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                status_baseline.extend(pool.map(git_status, baselines))
+                samples.extend(pool.map(operation, paths))
+        return samples
 
-        build_workspace, build_baseline = [], []
-        for _ in range(build_repetitions):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                build_workspace.extend(pool.map(build, paths))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-                build_baseline.extend(pool.map(build, baselines))
+    @staticmethod
+    def git_status(path: Path) -> float:
+        return milliseconds(lambda: run(["git", "-C", str(path), "status", "--porcelain"]))
 
-        self.results[f"git_status_workspace_concurrency_{concurrency}"] = summarize(status_workspace)
-        self.results[f"git_status_full_copy_concurrency_{concurrency}"] = summarize(status_baseline)
-        self.results[f"build_workspace_concurrency_{concurrency}"] = summarize(build_workspace)
-        self.results[f"build_full_copy_concurrency_{concurrency}"] = summarize(build_baseline)
+    @staticmethod
+    def build_from_scratch(path: Path) -> float:
+        # Every sample is a build from scratch, so repeated samples measure the
+        # same work rather than an already-built tree.
+        build_directory = path / "build"
+        shutil.rmtree(build_directory, ignore_errors=True)
 
+        def compile_project():
+            run(["cmake", "-S", str(path), "-B", str(build_directory), "-G", "Ninja"])
+            run(["ninja", "-C", str(build_directory)])
+            run(["ctest", "--test-dir", str(build_directory), "--output-on-failure"])
+        return milliseconds(compile_project)
+
+    def remove_runtime_paths(self, names, baselines):
         for name in names:
             self.tribios("workspace", "remove", name)
         self.tribios("workspace", "wait-reclaim")
         for baseline in baselines:
             shutil.rmtree(baseline)
 
+    def case_runtime(self, repetitions: int, build_repetitions: int, concurrency: int):
+        if not self.mounted():
+            self.results["runtime"] = {
+                "skipped": "this build has no macFUSE backend, so mounted-path runtime "
+                           "measurements cannot run"
+            }
+            return
 
-def evaluate(results, run_environment):
-    verdict = {}
+        names, paths, baselines = self.prepare_runtime_paths(concurrency)
+        status_workspace = self.measure_parallel(
+            self.git_status, paths, repetitions, concurrency)
+        status_baseline = self.measure_parallel(
+            self.git_status, baselines, repetitions, concurrency)
+        build_workspace = self.measure_parallel(
+            self.build_from_scratch, paths, build_repetitions, concurrency)
+        build_baseline = self.measure_parallel(
+            self.build_from_scratch, baselines, build_repetitions, concurrency)
+
+        self.results[f"git_status_workspace_concurrency_{concurrency}"] = summarize(status_workspace)
+        self.results[f"git_status_full_copy_concurrency_{concurrency}"] = summarize(status_baseline)
+        self.results[f"build_workspace_concurrency_{concurrency}"] = summarize(build_workspace)
+        self.results[f"build_full_copy_concurrency_{concurrency}"] = summarize(build_baseline)
+        self.remove_runtime_paths(names, baselines)
+
+
+def evaluate_environment(results, run_environment):
     macfuse_version = run_environment.get("macfuse_version", "unavailable")
-    verdict["macos_macfuse"] = {
-        "value": {
-            "platform": run_environment.get("platform", "unavailable"),
-            "macfuse_version": macfuse_version,
-        },
-        "gate": "macOS with the macFUSE kernel backend",
-        "pass": platform.system() == "Darwin" and macfuse_version != "unavailable",
-    }
-
     base_state = results.get("base_state", {})
     fixture_files = int(base_state.get("base regular files", 0))
     fixture_bytes = int(base_state.get("base bytes", 0))
-    verdict["fixture_scale"] = {
-        "value": {"files": fixture_files, "logical_bytes": fixture_bytes},
-        "gate": {
-            "minimum_files": MINIMUM_FIXTURE_FILES,
-            "minimum_logical_bytes": MINIMUM_FIXTURE_BYTES,
+    return {
+        "macos_macfuse": {
+            "value": {
+                "platform": run_environment.get("platform", "unavailable"),
+                "macfuse_version": macfuse_version,
+            },
+            "gate": "macOS with the macFUSE kernel backend",
+            "pass": platform.system() == "Darwin" and macfuse_version != "unavailable",
         },
-        "pass": fixture_files >= MINIMUM_FIXTURE_FILES and fixture_bytes >= MINIMUM_FIXTURE_BYTES,
+        "fixture_scale": {
+            "value": {"files": fixture_files, "logical_bytes": fixture_bytes},
+            "gate": {
+                "minimum_files": MINIMUM_FIXTURE_FILES,
+                "minimum_logical_bytes": MINIMUM_FIXTURE_BYTES,
+            },
+            "pass": (
+                fixture_files >= MINIMUM_FIXTURE_FILES
+                and fixture_bytes >= MINIMUM_FIXTURE_BYTES
+            ),
+        },
     }
+
+
+def evaluate_lifecycle(results, verdict):
     for concurrency in (1, 8):
         label = f"concurrency_{concurrency}"
         if f"workspace_create_{label}" not in results:
@@ -357,6 +406,8 @@ def evaluate(results, run_environment):
                     "value": round(ratio, 2), "gate": GATES["runtime_ratio"],
                     "pass": ratio <= GATES["runtime_ratio"]}
 
+
+def evaluate_correctness_and_storage(results, verdict):
     correctness = results.get("correctness")
     if correctness:
         verdict["correctness_suite"] = {
@@ -375,11 +426,16 @@ def evaluate(results, run_environment):
             "value": fraction, "gate": GATES["untouched_storage_fraction"],
             "pass": fraction <= GATES["untouched_storage_fraction"]}
         expected = storage["expected_copied_up_physical_bytes"]
-        overhead = (storage["mutated_upper_physical_bytes"] - expected) / max(expected, 1)
+        overhead = (storage["mutated_total_physical_bytes"] - expected) / max(expected, 1)
         verdict["mutated_storage_overhead"] = {
             "value": round(overhead, 6), "gate": GATES["mutated_storage_overhead_fraction"],
             "pass": 0 <= overhead <= GATES["mutated_storage_overhead_fraction"]}
 
+
+def evaluate(results, run_environment):
+    verdict = evaluate_environment(results, run_environment)
+    evaluate_lifecycle(results, verdict)
+    evaluate_correctness_and_storage(results, verdict)
     for name in REQUIRED_GATE_NAMES:
         verdict.setdefault(name, {"value": None, "gate": "measured", "pass": False,
                                   "note": "not measured in this run"})
@@ -450,7 +506,7 @@ def environment(project: Path, base_state):
     }
 
 
-def main() -> int:
+def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, help="path to the tribios CLI")
     parser.add_argument("--project", required=True, help="a configured Project")
@@ -467,7 +523,10 @@ def main() -> int:
         parser.error("--repetitions must be at least 5")
     if arguments.build_repetitions < 3:
         parser.error("--build-repetitions must be at least 3")
+    return parser, arguments
 
+
+def create_harness(parser, arguments):
     scratch = Path(arguments.scratch)
     scratch.mkdir(parents=True, exist_ok=True)
     harness = Harness(Path(arguments.cli), Path(arguments.project).resolve(), scratch)
@@ -479,7 +538,11 @@ def main() -> int:
             "insufficient scratch space for eight concurrent full copies: "
             f"need {space['required_free_bytes']} free bytes, "
             f"have {space['available_free_bytes']}")
+    harness.results["space_preflight"] = space
+    return harness
 
+
+def run_benchmark_cases(harness, arguments):
     base_state = {
         line.split(": ", 1)[0]: line.split(": ", 1)[1]
         for line in harness.tribios("info").splitlines() if ": " in line
@@ -487,7 +550,6 @@ def main() -> int:
     base_state["base regular files"] = str(
         regular_file_count(Path(arguments.project).resolve() / ".tribios" / "base"))
     harness.results["base_state"] = base_state
-    harness.results["space_preflight"] = space
     harness.case_correctness(Path(arguments.build_directory))
     harness.case_lifecycle(arguments.repetitions, concurrency=1)
     harness.case_lifecycle(arguments.repetitions, concurrency=8)
@@ -497,7 +559,10 @@ def main() -> int:
                          concurrency=1)
     harness.case_runtime(max(3, arguments.repetitions), arguments.build_repetitions,
                          concurrency=8)
+    return base_state
 
+
+def write_report(harness, arguments, base_state):
     run_environment = environment(Path(arguments.project).resolve(), base_state)
     report = {
         "environment": run_environment,
@@ -512,6 +577,13 @@ def main() -> int:
     print(json.dumps(report["verdict"], indent=2))
     print(f"verdict: {'PASS' if report['passed'] else 'FAIL'} (raw results in {output})")
     return 0 if report["passed"] else 1
+
+
+def main() -> int:
+    parser, arguments = parse_arguments()
+    harness = create_harness(parser, arguments)
+    base_state = run_benchmark_cases(harness, arguments)
+    return write_report(harness, arguments, base_state)
 
 
 if __name__ == "__main__":

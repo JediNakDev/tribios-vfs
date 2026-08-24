@@ -1,27 +1,24 @@
-# Experiment record — prototype v1
+# Experiment record: prototype v1
 
-THROWAWAY EXPERIMENT. Tracking issue: #1.
+This is a throwaway experiment for issue #1.
 
 ## Question
 
-Can a userspace, whole-file copy-on-write design provide correct, persistent,
-isolated Workspaces for a real Git/CMake/Ninja workflow on macOS while meeting
-the lifecycle, storage and runtime performance gates below?
+Can a userspace, whole-file copy-on-write design provide correct, persistent, isolated Workspaces for a real Git/CMake/Ninja workflow on macOS while meeting the lifecycle, storage and runtime performance gates below?
 
 ## Method
 
-1. Generate the performance fixture: `python3 bench/generate_fixture.py <path>` —
-   a reproducibly generated Git Project of 100,000 files and approximately 2 GiB
-   of logical data, roughly 60 percent of it ignored dependency content.
+1. Generate the performance fixture with `python3 bench/generate_fixture.py <path>`.
+   The command creates a reproducible Git Project with 100,000 files and approximately 2 GiB of logical data.
+   Ignored dependency content makes up roughly 60 percent of the fixture.
 2. Configure the Project and start the daemon.
-3. Run the benchmark: `python3 bench/benchmark.py … --build-directory build`,
-   which runs the correctness suite, then writes raw samples, medians, p95
-   values, the environment and the gate evaluation to `bench/results/`. Every
-   gate must have a measurement behind it: a missing or skipped one fails.
+3. Run `python3 bench/benchmark.py ... --build-directory build`.
+   The benchmark runs the correctness suite and writes raw samples, medians, p95 values, the environment and the gate evaluation to `bench/results/`.
+   Missing or skipped measurements fail their gates.
 4. Attach the environment, the raw results file and the verdict to issue #1.
 
-The full-copy baseline reproduces the same Workspace contents, including ignored
-and untracked data, and excludes only Tribios' own storage.
+The full-copy baseline reproduces the same Workspace contents, including ignored and untracked data.
+It excludes only Tribios' own storage.
 
 ## Gates
 
@@ -38,10 +35,12 @@ The prototype passes only if every gate below passes.
 | Representative build and test duration vs native baseline | at most 1.5x |
 | Concurrency | measured at 1 and at 8 concurrent Workspaces |
 
-Base-state capture time is reported separately and is not part of the creation
-gate. Physical reclamation time and transient storage are measured and reported
-but are not included in logical removal latency.
-Storage measurements use allocated backing-store bytes, including the upper tree's private metadata file.
+Base-state capture time is reported separately and is not part of the creation gate.
+Physical reclamation time and transient storage are measured and reported but are not included in logical removal latency.
+The benchmark samples transient storage immediately before timed removal after its own writes stop and before background reclamation begins.
+The measurement is not atomic against external writes through already-open handles.
+Storage measurements use allocated backing-store bytes from the upper tree and allocation growth in SQLite, its write-ahead log and shared-memory sidecar.
+The mutated case creates tombstones so their metadata allocation is included.
 The harness requires at least five lifecycle samples and three build and test samples.
 It also requires enough free scratch space for eight full-copy baselines plus a 1 GiB safety margin.
 

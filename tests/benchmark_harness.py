@@ -43,7 +43,7 @@ class BenchmarkHarnessTest(unittest.TestCase):
             },
             "storage": {
                 "untouched_fraction_of_base": 0.001,
-                "mutated_upper_physical_bytes": expected + 4096,
+                "mutated_total_physical_bytes": expected + 4096,
                 "expected_copied_up_physical_bytes": expected,
             },
         }
@@ -100,6 +100,21 @@ class BenchmarkHarnessTest(unittest.TestCase):
                 + benchmark.FREE_SPACE_SAFETY_BYTES,
                 requirement["required_free_bytes"],
             )
+
+    def test_metadata_store_bytes_includes_database_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            tribios = project / ".tribios"
+            tribios.mkdir()
+            (tribios / "meta.db").write_bytes(b"x")
+            (tribios / "meta.db-wal").write_bytes(b"x")
+            (tribios / "meta.db-shm").write_bytes(b"x")
+
+            expected = sum(
+                benchmark.allocated_file_bytes(path)
+                for path in tribios.iterdir()
+            )
+            self.assertEqual(expected, benchmark.metadata_store_bytes(project))
 
 
 if __name__ == "__main__":
