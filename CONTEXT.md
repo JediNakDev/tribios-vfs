@@ -27,9 +27,14 @@ Later changes to the source of the Base state do not appear in the Workspace.
 _Avoid_: Live base, shared working tree
 
 **Workspace contents**:
-All regular files, directories, and symlinks included when Tribios captures a Base state, regardless of Git tracking or ignore rules.
+All regular files, directories, and symlinks included when Tribios captures a Base state after applying Capture exclusions, regardless of Git tracking or ignore rules.
 Tribios metadata, special files, external symlink targets, and nested mounts lie outside the Workspace contents.
 _Avoid_: Tracked files, source files
+
+**Capture exclusion**:
+A Project-relative rule that prevents matching content from entering future Base states.
+It is independent of Git ignore rules and never changes existing Base states or Workspaces.
+_Avoid_: Git ignore, Workspace ignore
 
 **Workspace lifecycle**:
 The period from explicit Workspace creation through explicit removal, matching the lifecycle of a Git worktree.
