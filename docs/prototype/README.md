@@ -64,6 +64,7 @@ gates and the results template.
 ## Layout
 
 ```text
+includes/    public headers, grouped by component
 src/core/    Workspace engine, Base-state capture, metadata store, lifecycle
 src/fuse/    the FUSE adapter — the only operating-system specific code
 src/daemon/  long-running daemon and its Unix-domain control interface

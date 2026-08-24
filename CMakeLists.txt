@@ -22,7 +22,7 @@ add_library(tribios_core STATIC
   src/core/git_worktree.cpp
   src/core/project_manager.cpp
 )
-target_include_directories(tribios_core PUBLIC src)
+target_include_directories(tribios_core PUBLIC includes)
 target_link_libraries(tribios_core PUBLIC PkgConfig::SQLITE3)
 find_package(Threads REQUIRED)
 target_link_libraries(tribios_core PUBLIC Threads::Threads)
