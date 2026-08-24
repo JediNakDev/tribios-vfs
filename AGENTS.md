@@ -4,6 +4,24 @@ This repository uses the Matt Pocock engineering skills.
 Before starting an engineering workflow, verify that the relevant Matt Pocock skills are available.
 If they are unavailable, ask the user to install the Matt Pocock skills bundle before continuing.
 
+## Code preferences
+
+- Write direct, purpose-built code for the current requirements.
+  Avoid abstractions, options, and generalization intended only for hypothetical reuse or future requirements.
+- Prefer the simplest readable control flow with the fewest useful layers of indirection.
+- Limit comments to short inline comments that explain nontrivial behavior.
+- Use precise, descriptive names, even when they are long.
+  Name a function after its exact operation, such as `open_socket_file` instead of `open_fd` or `open_file`.
+- Use `glb_` for global-variable prefixes when a prefix is useful.
+  Avoid opaque prefixes such as `g_`.
+- Keep short, single-use logic inline, especially when a helper would only wrap another function in one or two lines.
+- Extract a helper when logic is reused, forms a meaningful operation, or would otherwise make a function longer than roughly one screen, about 40 to 60 lines.
+  A clear length or responsibility boundary can justify a single-use helper.
+- Keep each file focused on one responsibility.
+  Split unrelated responsibilities into separate files.
+- Put declarations shared by multiple files in the same directory in a private header.
+  Expose them publicly only when code outside that directory needs them.
+
 ### Issue tracker
 
 Track issues in this repository's GitHub Issues.
