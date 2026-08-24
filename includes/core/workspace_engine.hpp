@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <shared_mutex>
@@ -12,7 +13,6 @@
 
 #include "core/error.hpp"
 #include "core/metadata_store.hpp"
-#include "core/paths.hpp"
 
 namespace tribios {
 
@@ -37,8 +37,8 @@ struct DirEntry {
 // this class.
 class WorkspaceEngine {
  public:
-  WorkspaceEngine(std::string workspace, fs::path base_dir, fs::path upper_dir,
-                  MetadataStore& store);
+  WorkspaceEngine(std::string workspace, std::filesystem::path base_dir,
+                  std::filesystem::path upper_dir, MetadataStore& store);
 
   Result<Attr> getattr(std::string_view path);
   Result<std::vector<DirEntry>> readdir(std::string_view path);
@@ -69,8 +69,8 @@ class WorkspaceEngine {
   enum class Layer { Missing, Upper, Base };
 
   // Every helper below assumes the caller holds mutex_.
-  fs::path upper_path(std::string_view relative) const;
-  fs::path base_path(std::string_view relative) const;
+  std::filesystem::path upper_path(std::string_view relative) const;
+  std::filesystem::path base_path(std::string_view relative) const;
   bool base_is_visible(const std::string& relative) const;
   Layer find_visible_entry_layer(const std::string& relative, struct stat& out) const;
   void merge_visible_directory_entries(const std::string& relative,
@@ -79,11 +79,11 @@ class WorkspaceEngine {
   Status copy_visible_entry_to_upper(const std::string& relative);
   Status move_visible_entry_to_upper(const std::string& from, const std::string& to);
   Status add_tombstone(const std::string& relative);
-  void drop_tombstones_under(const std::string& relative);
+  Status drop_tombstones_under(const std::string& relative);
 
   std::string workspace_;
-  fs::path base_dir_;
-  fs::path upper_dir_;
+  std::filesystem::path base_dir_;
+  std::filesystem::path upper_dir_;
   MetadataStore& store_;
   mutable std::shared_mutex mutex_;
   std::set<std::string> tombstones_;

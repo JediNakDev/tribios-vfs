@@ -1,0 +1,14 @@
+{
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "C_Cpp.default.cppStandard": "c++23",
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.configureOnEdit": true,
+  "cmake.configureOnOpen": true,
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build",
+    "--background-index"
+  ],
+  "files.associations": {
+    "*.hpp": "cpp"
+  }
+}

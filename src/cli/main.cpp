@@ -1,17 +1,22 @@
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/stat.h>
+#ifdef __APPLE__
+#include <sys/mount.h>
+#endif
 #include <unistd.h>
 
 #include <chrono>
-#include <filesystem>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include "core/base_capture.hpp"
+#include "core/paths.hpp"
 #include "core/project_manager.hpp"
 #include "daemon/control_client.hpp"
 
@@ -28,7 +33,8 @@ namespace fs = std::filesystem;
 using tribios::Outcome;
 using tribios::OutcomeVoid;
 
-constexpr const char* kUsage = R"(tribios - THROWAWAY PROTOTYPE (see docs/prototype/README.md)
+constexpr const char* kUsage =
+    R"(tribios - THROWAWAY PROTOTYPE (see docs/prototype/README.md)
 
 usage:
   tribios configure <project> [--mount <path>] [--force]
@@ -77,35 +83,35 @@ Options parse_command_line(int argc, char** argv) {
 }
 
 // An explicit flag, TRIBIOS_PROJECT, or the nearest configured ancestor.
-Outcome<fs::path> resolve_configured_project_root(const Options& options) {
-  if (!options.project.empty()) return fs::absolute(options.project);
+Outcome<std::filesystem::path> resolve_configured_project_root(const Options& options) {
+  if (!options.project.empty()) return std::filesystem::absolute(options.project);
   if (const char* from_env = std::getenv("TRIBIOS_PROJECT"); from_env != nullptr) {
-    return fs::absolute(from_env);
+    return std::filesystem::absolute(from_env);
   }
   std::error_code ec;
-  for (fs::path current = fs::current_path(ec); !current.empty();
+  for (std::filesystem::path current = std::filesystem::current_path(ec); !current.empty();
        current = current.parent_path()) {
-    if (fs::exists(current / tribios::kTribiosDirName / "meta.db", ec)) return current;
+    if (std::filesystem::exists(current / tribios::kTribiosDirName / "meta.db", ec)) return current;
     if (current == current.root_path()) break;
   }
   return error("no configured project found: pass --project or run `tribios configure`");
 }
 
-fs::path executable_directory(const char* argv0) {
+std::filesystem::path executable_directory(const char* argv0) {
   char buffer[4096];
 #ifdef __APPLE__
   std::uint32_t size = sizeof(buffer);
   if (_NSGetExecutablePath(buffer, &size) == 0) {
-    return fs::weakly_canonical(fs::path(buffer)).parent_path();
+    return std::filesystem::weakly_canonical(std::filesystem::path(buffer)).parent_path();
   }
 #else
   const ssize_t n = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
   if (n > 0) {
     buffer[n] = '\0';
-    return fs::path(buffer).parent_path();
+    return std::filesystem::path(buffer).parent_path();
   }
 #endif
-  return fs::absolute(fs::path(argv0)).parent_path();
+  return std::filesystem::absolute(std::filesystem::path(argv0)).parent_path();
 }
 
 int report_error(const std::string& message) {
@@ -113,7 +119,8 @@ int report_error(const std::string& message) {
   return 1;
 }
 
-OutcomeVoid wait_for_socket(const fs::path& socket_path, std::chrono::seconds timeout) {
+OutcomeVoid wait_for_socket(const std::filesystem::path& socket_path,
+                            std::chrono::seconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     auto pinged = tribios::control_request(socket_path, {"ping"});
@@ -123,9 +130,43 @@ OutcomeVoid wait_for_socket(const fs::path& socket_path, std::chrono::seconds ti
   return error("the daemon did not start within the timeout");
 }
 
+OutcomeVoid wait_for_socket_to_close(const std::filesystem::path& socket_path,
+                                     std::chrono::seconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!tribios::control_request(socket_path, {"ping"})) return {};
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  return error("the daemon did not stop within the timeout");
+}
+
+bool mount_is_active(const std::filesystem::path& mount_point) {
+#ifdef __APPLE__
+  struct statfs mount_info {};
+  return ::statfs(mount_point.c_str(), &mount_info) == 0 &&
+         std::string_view(mount_info.f_fstypename) == "macfuse";
+#else
+  struct stat mount_stat {};
+  struct stat parent_stat {};
+  return ::stat(mount_point.c_str(), &mount_stat) == 0 &&
+         ::stat(mount_point.parent_path().c_str(), &parent_stat) == 0 &&
+         mount_stat.st_dev != parent_stat.st_dev;
+#endif
+}
+
+OutcomeVoid wait_for_mount_to_close(const std::filesystem::path& mount_point,
+                                    std::chrono::seconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!mount_is_active(mount_point)) return {};
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  return error("the mount did not stop within the timeout");
+}
+
 int command_configure(const Options& options) {
   if (options.positional.size() < 2) return report_error("configure needs a project directory");
-  const fs::path root = fs::absolute(options.positional[1]);
+  const std::filesystem::path root = std::filesystem::absolute(options.positional[1]);
   auto captured = tribios::ProjectManager::configure(root, options.mount, options.force);
   if (!captured) return report_error(captured.error());
 
@@ -133,8 +174,9 @@ int command_configure(const Options& options) {
   std::cout << "configured " << paths.root << "\n"
             << "base state: " << captured->entry_count << " entries, " << captured->bytes
             << " bytes, captured in " << captured->duration_ms << " ms\n"
-            << "mount point: " << (options.mount.empty() ? paths.mount_point.string()
-                                                         : fs::absolute(options.mount).string())
+            << "mount point: "
+            << (options.mount.empty() ? paths.mount_point.string()
+                                      : std::filesystem::absolute(options.mount).string())
             << "\n";
   std::cerr << tribios::kSecretsWarning << "\n";
   return 0;
@@ -155,6 +197,10 @@ int command_daemon(const Options& options, const char* argv0) {
   if (action == "stop") {
     auto stopped = tribios::control_request(paths.socket, {"shutdown"});
     if (!stopped) return report_error(stopped.error());
+    auto closed = wait_for_socket_to_close(paths.socket, std::chrono::seconds(15));
+    if (!closed) return report_error(closed.error());
+    auto unmounted = wait_for_mount_to_close(paths.mount_point, std::chrono::seconds(15));
+    if (!unmounted) return report_error(unmounted.error());
     std::cout << "stopped\n";
     return 0;
   }
@@ -165,7 +211,7 @@ int command_daemon(const Options& options, const char* argv0) {
     return 0;
   }
 
-  fs::path daemon_path;
+  std::filesystem::path daemon_path;
   if (const char* from_env = std::getenv("TRIBIOS_DAEMON"); from_env != nullptr) {
     daemon_path = from_env;
   } else {
@@ -183,8 +229,8 @@ int command_daemon(const Options& options, const char* argv0) {
                                    O_WRONLY | O_CREAT | O_APPEND, 0644);
   posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
   pid_t pid = 0;
-  const int spawned = posix_spawn(&pid, daemon_path.c_str(), &actions, nullptr, raw.data(),
-                                  environ);
+  const int spawned =
+      posix_spawn(&pid, daemon_path.c_str(), &actions, nullptr, raw.data(), environ);
   posix_spawn_file_actions_destroy(&actions);
   if (spawned != 0) return report_error("cannot start " + daemon_path.string());
 
@@ -205,8 +251,8 @@ int command_workspace(const Options& options) {
 
   if (action == "create") {
     if (options.positional.size() < 3) return report_error("workspace create needs a name");
-    auto created = tribios::control_request(
-        paths.socket, {"ws.create", options.positional[2], options.branch});
+    auto created = tribios::control_request(paths.socket,
+                                            {"ws.create", options.positional[2], options.branch});
     if (!created) return report_error(created.error());
     std::cout << "created " << created->at(0) << " on branch " << created->at(1) << " in "
               << created->at(2) << " us at " << created->at(3) << "\n";
@@ -278,8 +324,7 @@ int command_upper_bytes(const Options& options) {
   auto project = resolve_configured_project_root(options);
   if (!project) return report_error(project.error());
   const auto paths = tribios::ProjectPaths::from_project_root(*project);
-  auto replied =
-      tribios::control_request(paths.socket, {"stats.upper", options.positional[1]});
+  auto replied = tribios::control_request(paths.socket, {"stats.upper", options.positional[1]});
   if (!replied) return report_error(replied.error());
   std::cout << replied->at(0) << "\n";
   return 0;

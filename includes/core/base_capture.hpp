@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 
 #include "core/error.hpp"
-#include "core/paths.hpp"
 
 namespace tribios {
 
@@ -17,7 +17,8 @@ struct CaptureStats {
 // Tribios storage as one immutable Base state, regardless of Git tracking or
 // ignore rules. Git and Tribios metadata, special files and nested mounts are
 // left out; symlinks are copied as symlinks, never followed.
-Outcome<CaptureStats> capture_base_state(const fs::path& project_root, const fs::path& base_dir);
+Outcome<CaptureStats> capture_base_state(const std::filesystem::path& project_root,
+                                         const std::filesystem::path& base_dir);
 
 extern const char* const kSecretsWarning;
 

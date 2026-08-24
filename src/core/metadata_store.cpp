@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 
 #include <chrono>
+#include <filesystem>
 #include <variant>
 
 namespace tribios {
@@ -40,7 +41,8 @@ CREATE TABLE IF NOT EXISTS tombstone (
 )sql";
 
 constexpr const char* kWorkspaceColumns =
-    "name, branch, state, created_at, create_us, removed_at, logical_remove_us, reclaim_us";
+    "name, branch, state, created_at, create_us, removed_at, "
+    "logical_remove_us, reclaim_us";
 
 sqlite3_stmt* prepare_bound_statement(sqlite3* db, const std::string& sql,
                                       const std::vector<SqlValue>& values) {
@@ -112,12 +114,11 @@ std::int64_t steady_clock_microseconds() {
 MetadataStore::~MetadataStore() { sqlite3_close(db_); }
 
 Outcome<std::unique_ptr<MetadataStore>> MetadataStore::open_database(
-    const fs::path& database_path) {
+    const std::filesystem::path& database_path) {
   sqlite3* db = nullptr;
-  const int opened = sqlite3_open_v2(
-      database_path.c_str(), &db,
-      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-      nullptr);
+  const int opened =
+      sqlite3_open_v2(database_path.c_str(), &db,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
   if (opened != SQLITE_OK) {
     std::string message = db == nullptr ? "cannot open database" : sqlite3_errmsg(db);
     sqlite3_close(db);
@@ -135,8 +136,7 @@ Outcome<std::unique_ptr<MetadataStore>> MetadataStore::open_database(
 
 namespace {
 
-OutcomeVoid execute_statement_without_rows(sqlite3* db, std::mutex& mutex,
-                                           const std::string& sql,
+OutcomeVoid execute_statement_without_rows(sqlite3* db, std::mutex& mutex, const std::string& sql,
                                            const std::vector<SqlValue>& values) {
   std::lock_guard lock(mutex);
   sqlite3_stmt* statement = prepare_bound_statement(db, sql, values);
@@ -152,27 +152,27 @@ OutcomeVoid execute_statement_without_rows(sqlite3* db, std::mutex& mutex,
 OutcomeVoid MetadataStore::save_project_record(const ProjectRecord& record) {
   return execute_statement_without_rows(
       db_, mutex_,
-      "INSERT OR REPLACE INTO project (id, root, mount_point, base_captured_at, "
-      "base_capture_ms, base_entry_count, base_bytes) VALUES (1, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO project (id, root, mount_point, "
+      "base_captured_at, "
+      "base_capture_ms, base_entry_count, base_bytes) VALUES (1, ?, ?, ?, ?, "
+      "?, ?)",
       {record.root, record.mount_point, record.base_captured_at, record.base_capture_ms,
        record.base_entry_count, record.base_bytes});
 }
 
 std::optional<ProjectRecord> MetadataStore::load_project_record() {
   std::lock_guard lock(mutex_);
-  sqlite3_stmt* statement = prepare_bound_statement(
-      db_, "SELECT root, mount_point, base_captured_at, base_capture_ms, base_entry_count, "
-           "base_bytes FROM project",
-      {});
+  sqlite3_stmt* statement = prepare_bound_statement(db_,
+                                                    "SELECT root, mount_point, base_captured_at, "
+                                                    "base_capture_ms, base_entry_count, "
+                                                    "base_bytes FROM project",
+                                                    {});
   if (statement == nullptr) return std::nullopt;
   std::optional<ProjectRecord> record;
   if (sqlite3_step(statement) == SQLITE_ROW) {
-    record = ProjectRecord{column_text(statement, 0),
-                           column_text(statement, 1),
-                           sqlite3_column_int64(statement, 2),
-                           sqlite3_column_int64(statement, 3),
-                           sqlite3_column_int64(statement, 4),
-                           sqlite3_column_int64(statement, 5)};
+    record = ProjectRecord{column_text(statement, 0),          column_text(statement, 1),
+                           sqlite3_column_int64(statement, 2), sqlite3_column_int64(statement, 3),
+                           sqlite3_column_int64(statement, 4), sqlite3_column_int64(statement, 5)};
   }
   sqlite3_finalize(statement);
   return record;
@@ -214,9 +214,9 @@ std::vector<WorkspaceRecord> MetadataStore::load_all_workspace_records() {
 }
 
 OutcomeVoid MetadataStore::set_workspace_state(const std::string& name, WorkspaceState state) {
-  return execute_statement_without_rows(
-      db_, mutex_, "UPDATE workspace SET state = ? WHERE name = ?",
-      {std::string(workspace_state_name(state)), name});
+  return execute_statement_without_rows(db_, mutex_,
+                                        "UPDATE workspace SET state = ? WHERE name = ?",
+                                        {std::string(workspace_state_name(state)), name});
 }
 
 OutcomeVoid MetadataStore::set_workspace_reclamation_duration(const std::string& name,
@@ -239,12 +239,11 @@ OutcomeVoid MetadataStore::remove_tombstones_under(const std::string& workspace,
 }
 
 OutcomeVoid MetadataStore::clear_tombstones(const std::string& workspace) {
-  return execute_statement_without_rows(
-      db_, mutex_, "DELETE FROM tombstone WHERE workspace = ?", {workspace});
+  return execute_statement_without_rows(db_, mutex_, "DELETE FROM tombstone WHERE workspace = ?",
+                                        {workspace});
 }
 
-std::vector<std::string> MetadataStore::load_workspace_tombstones(
-    const std::string& workspace) {
+std::vector<std::string> MetadataStore::load_workspace_tombstones(const std::string& workspace) {
   std::lock_guard lock(mutex_);
   std::vector<std::string> paths;
   sqlite3_stmt* statement =

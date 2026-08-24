@@ -3,11 +3,13 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <system_error>
 
 #include "core/git_worktree.hpp"
+#include "core/paths.hpp"
 
 namespace tribios {
 namespace {
@@ -15,8 +17,8 @@ namespace {
 bool is_valid_workspace_name(const std::string& name) {
   if (name.empty() || name.size() > 64 || name == "." || name == "..") return false;
   for (char c : name) {
-    const bool allowed = std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' ||
-                         c == '_' || c == '.';
+    const bool allowed =
+        std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '_' || c == '.';
     if (!allowed) return false;
   }
   return true;
@@ -24,9 +26,9 @@ bool is_valid_workspace_name(const std::string& name) {
 
 }  // namespace
 
-ProjectPaths ProjectPaths::from_project_root(const fs::path& project_root) {
+ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& project_root) {
   std::error_code ec;
-  fs::path root = fs::weakly_canonical(project_root, ec);
+  std::filesystem::path root = std::filesystem::weakly_canonical(project_root, ec);
   if (ec) root = project_root;
 
   ProjectPaths paths;
@@ -47,29 +49,31 @@ ProjectPaths ProjectPaths::from_project_root(const fs::path& project_root) {
     char name[64];
     std::snprintf(name, sizeof(name), "tribios-%016llx.sock",
                   static_cast<unsigned long long>(std::hash<std::string>{}(root.string())));
-    paths.socket = fs::path(tmp != nullptr ? tmp : "/tmp") / name;
+    paths.socket = std::filesystem::path(tmp != nullptr ? tmp : "/tmp") / name;
   }
   return paths;
 }
 
 ProjectManager::~ProjectManager() { wait_for_reclamation(); }
 
-fs::path ProjectManager::workspace_upper_directory(const std::string& name) const {
+std::filesystem::path ProjectManager::workspace_upper_directory(const std::string& name) const {
   return paths_.workspaces_dir / name / "upper";
 }
 
-Outcome<CaptureStats> ProjectManager::configure(const fs::path& project_root,
-                                                const fs::path& mount_point, bool force) {
+Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& project_root,
+                                                const std::filesystem::path& mount_point,
+                                                bool force) {
   const ProjectPaths paths = ProjectPaths::from_project_root(project_root);
   std::error_code ec;
-  if (!fs::is_directory(paths.root, ec)) return error(paths.root.string() + " is not a directory");
+  if (!std::filesystem::is_directory(paths.root, ec))
+    return error(paths.root.string() + " is not a directory");
   if (!is_git_project(paths.root)) return error(paths.root.string() + " is not a Git Project");
-  if (fs::exists(paths.database, ec) && !force) {
+  if (std::filesystem::exists(paths.database, ec) && !force) {
     return error("project is already configured; the Base state is captured once");
   }
-  if (force) fs::remove_all(paths.tribios_dir, ec);
+  if (force) std::filesystem::remove_all(paths.tribios_dir, ec);
   for (const auto& dir : {paths.tribios_dir, paths.workspaces_dir, paths.mount_point}) {
-    fs::create_directories(dir, ec);
+    std::filesystem::create_directories(dir, ec);
     if (ec) return error("cannot create " + dir.string() + ": " + ec.message());
   }
 
@@ -81,8 +85,8 @@ Outcome<CaptureStats> ProjectManager::configure(const fs::path& project_root,
 
   ProjectRecord record;
   record.root = paths.root.string();
-  record.mount_point =
-      mount_point.empty() ? paths.mount_point.string() : fs::absolute(mount_point).string();
+  record.mount_point = mount_point.empty() ? paths.mount_point.string()
+                                           : std::filesystem::absolute(mount_point).string();
   record.base_captured_at = current_unix_time_seconds();
   record.base_capture_ms = captured->duration_ms;
   record.base_entry_count = captured->entry_count;
@@ -94,10 +98,10 @@ Outcome<CaptureStats> ProjectManager::configure(const fs::path& project_root,
 }
 
 Outcome<std::unique_ptr<ProjectManager>> ProjectManager::open_configured_project(
-    const fs::path& project_root) {
+    const std::filesystem::path& project_root) {
   ProjectPaths paths = ProjectPaths::from_project_root(project_root);
   std::error_code ec;
-  if (!fs::exists(paths.database, ec)) {
+  if (!std::filesystem::exists(paths.database, ec)) {
     return error("project is not configured: run `tribios configure` first");
   }
   auto store = MetadataStore::open_database(paths.database);
@@ -106,8 +110,7 @@ Outcome<std::unique_ptr<ProjectManager>> ProjectManager::open_configured_project
   if (!record) return error("project record is missing from the metadata store");
   paths.mount_point = record->mount_point;
 
-  std::unique_ptr<ProjectManager> manager(
-      new ProjectManager(paths, *record, std::move(*store)));
+  std::unique_ptr<ProjectManager> manager(new ProjectManager(paths, *record, std::move(*store)));
   for (const auto& workspace : manager->store_->load_all_workspace_records()) {
     if (workspace.state == WorkspaceState::Active) {
       manager->engines_.emplace(
@@ -135,20 +138,20 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   }
 
   const std::string branch = requested_branch.empty() ? name : requested_branch;
-  const fs::path upper = workspace_upper_directory(name);
-  const fs::path workspace_path = paths_.mount_point / name;
+  const std::filesystem::path upper = workspace_upper_directory(name);
+  const std::filesystem::path workspace_path = paths_.mount_point / name;
   const std::int64_t started = steady_clock_microseconds();
 
   // Creation never traverses the Base state: it makes one empty upper tree and
   // some metadata, so its cost does not grow with the Project.
   std::error_code ec;
-  fs::create_directories(upper, ec);
+  std::filesystem::create_directories(upper, ec);
   if (ec) return error("cannot create Workspace storage: " + ec.message());
 
-  auto git_file = register_linked_worktree(paths_.root, branch, workspace_path,
-                                           paths_.staging_dir / name);
+  auto git_file =
+      register_linked_worktree(paths_.root, branch, workspace_path, paths_.staging_dir / name);
   if (!git_file) {
-    fs::remove_all(upper, ec);
+    std::filesystem::remove_all(upper, ec);
     return std::unexpected(git_file.error());
   }
   std::ofstream(upper / kGitDirName) << *git_file;
@@ -160,7 +163,7 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   record.created_at = current_unix_time_seconds();
   record.create_us = steady_clock_microseconds() - started;
   if (auto stored = store_->save_workspace_record(record); !stored) {
-    fs::remove_all(upper, ec);
+    std::filesystem::remove_all(upper, ec);
     return std::unexpected(stored.error());
   }
 
@@ -180,8 +183,8 @@ Outcome<RemoveResult> ProjectManager::remove_workspace(const std::string& name) 
     engines_.erase(name);
   }
 
-  // The Workspace is inaccessible and its removed state is committed before this
-  // returns. Freeing its upper tree happens afterwards.
+  // The Workspace is inaccessible and its removed state is committed before
+  // this returns. Freeing its upper tree happens afterwards.
   auto record = store_->load_workspace_record(name);
   if (!record) return error("no Workspace record for " + name);
   record->state = WorkspaceState::Removed;
@@ -201,12 +204,13 @@ void ProjectManager::start_workspace_reclamation(const std::string& name) {
   reclaimers_.emplace_back([this, name] {
     const std::int64_t started = steady_clock_microseconds();
     std::error_code ec;
-    fs::remove_all(paths_.workspaces_dir / name, ec);
+    std::filesystem::remove_all(paths_.workspaces_dir / name, ec);
     unregister_linked_worktree(paths_.root, name);
-    store_->clear_tombstones(name);
-    store_->set_workspace_reclamation_duration(
-        name, steady_clock_microseconds() - started);
-    store_->set_workspace_state(name, WorkspaceState::Reclaimed);
+    if (!store_->clear_tombstones(name)) return;
+    if (!store_->set_workspace_reclamation_duration(name, steady_clock_microseconds() - started)) {
+      return;
+    }
+    if (!store_->set_workspace_state(name, WorkspaceState::Reclaimed)) return;
   });
 }
 

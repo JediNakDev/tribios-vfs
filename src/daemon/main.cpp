@@ -1,8 +1,15 @@
+#include <sys/stat.h>
+#ifdef __APPLE__
+#include <sys/mount.h>
+#endif
+
+#include <chrono>
 #include <csignal>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
-#include <vector>
 
 #include "core/project_manager.hpp"
 #include "daemon/control_server.hpp"
@@ -11,7 +18,34 @@
 namespace {
 
 tribios::ControlServer* glb_control_server = nullptr;
-tribios::fs::path glb_mount_point;
+std::filesystem::path glb_mount_point;
+
+bool wait_for_mount(const std::filesystem::path& mount_point,
+                    std::chrono::seconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+#ifdef __APPLE__
+  struct statfs mount_info {};
+#else
+  struct stat mount_stat {};
+  struct stat parent_stat {};
+#endif
+  while (std::chrono::steady_clock::now() < deadline) {
+#ifdef __APPLE__
+    if (::statfs(mount_point.c_str(), &mount_info) == 0 &&
+        std::string_view(mount_info.f_fstypename) == "macfuse") {
+      return true;
+    }
+#else
+    if (::stat(mount_point.c_str(), &mount_stat) == 0 &&
+        ::stat(mount_point.parent_path().c_str(), &parent_stat) == 0 &&
+        mount_stat.st_dev != parent_stat.st_dev) {
+      return true;
+    }
+#endif
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
 
 void stop_daemon_on_signal(int) {
   if (glb_control_server != nullptr) glb_control_server->stop();
@@ -55,15 +89,20 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, stop_daemon_on_signal);
 
   std::thread mount_thread;
-  server.set_mount_active(mount && tribios::mount_supported());
   if (mount && tribios::mount_supported()) {
     glb_mount_point = paths.mount_point;
     mount_thread = std::thread([&] {
       auto mounted = tribios::run_project_mount(**manager, paths.mount_point, debug);
       if (!mounted) std::cerr << "tribios_daemon: " << mounted.error() << "\n";
     });
+    const bool mounted = wait_for_mount(paths.mount_point, std::chrono::seconds(10));
+    server.set_mount_active(mounted);
+    if (!mounted) {
+      std::cerr << "tribios_daemon: mount did not become ready within the timeout\n";
+    }
   } else if (mount) {
-    std::cerr << "tribios_daemon: no FUSE backend in this build, serving control only\n";
+    std::cerr << "tribios_daemon: no FUSE backend in this build, serving "
+                 "control only\n";
   }
 
   std::cerr << "tribios_daemon: serving " << paths.root << " on " << paths.socket << "\n";

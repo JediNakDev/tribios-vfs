@@ -1,12 +1,9 @@
 #pragma once
 
-#include <filesystem>
 #include <string>
 #include <string_view>
 
 namespace tribios {
-
-namespace fs = std::filesystem;
 
 inline constexpr const char* kTribiosDirName = ".tribios";
 inline constexpr const char* kGitDirName = ".git";

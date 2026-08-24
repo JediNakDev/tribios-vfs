@@ -9,9 +9,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
+#include "core/paths.hpp"
 #include "core/proc.hpp"
 
 namespace tribios {
@@ -294,16 +296,17 @@ fuse_operations create_fuse_operations() {
 
 bool mount_supported() { return true; }
 
-OutcomeVoid run_project_mount(ProjectManager& manager, const fs::path& mount_point, bool debug) {
+OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::path& mount_point,
+                              bool debug) {
   glb_project_manager = &manager;
   std::error_code ec;
-  fs::create_directories(mount_point, ec);
+  std::filesystem::create_directories(mount_point, ec);
 
   // Multi-threaded on purpose: eight concurrent Workspaces must not queue
   // behind one another. default_permissions has the kernel enforce the modes
   // the engine reports, so permission changes behave like the host filesystem.
-  std::vector<std::string> arguments{"tribios", mount_point.string(), "-f",
-                                     "-o", "default_permissions"};
+  std::vector<std::string> arguments{"tribios", mount_point.string(), "-f", "-o",
+                                     "default_permissions"};
 #ifdef __APPLE__
   arguments.insert(arguments.end(), {"-o", "volname=Tribios", "-o", "noappledouble"});
 #endif
@@ -318,7 +321,7 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const fs::path& mount_poi
   return {};
 }
 
-void request_unmount(const fs::path& mount_point) {
+void request_unmount(const std::filesystem::path& mount_point) {
 #ifdef __APPLE__
   if (!run_process_and_capture_output({"umount", mount_point.string()}).ok()) {
     run_process_and_capture_output({"diskutil", "unmount", "force", mount_point.string()});

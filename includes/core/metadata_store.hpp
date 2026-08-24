@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -9,7 +10,6 @@
 #include <vector>
 
 #include "core/error.hpp"
-#include "core/paths.hpp"
 
 struct sqlite3;
 
@@ -44,7 +44,8 @@ struct WorkspaceRecord {
 class MetadataStore {
  public:
   ~MetadataStore();
-  static Outcome<std::unique_ptr<MetadataStore>> open_database(const fs::path& database_path);
+  static Outcome<std::unique_ptr<MetadataStore>> open_database(
+      const std::filesystem::path& database_path);
 
   OutcomeVoid save_project_record(const ProjectRecord& record);
   std::optional<ProjectRecord> load_project_record();
@@ -53,8 +54,7 @@ class MetadataStore {
   std::optional<WorkspaceRecord> load_workspace_record(const std::string& name);
   std::vector<WorkspaceRecord> load_all_workspace_records();
   OutcomeVoid set_workspace_state(const std::string& name, WorkspaceState state);
-  OutcomeVoid set_workspace_reclamation_duration(const std::string& name,
-                                                 std::int64_t reclaim_us);
+  OutcomeVoid set_workspace_reclamation_duration(const std::string& name, std::int64_t reclaim_us);
 
   OutcomeVoid add_tombstone(const std::string& workspace, const std::string& path);
   OutcomeVoid remove_tombstones_under(const std::string& workspace, const std::string& path);

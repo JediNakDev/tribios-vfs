@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -11,30 +12,29 @@
 #include "core/base_capture.hpp"
 #include "core/error.hpp"
 #include "core/metadata_store.hpp"
-#include "core/paths.hpp"
 #include "core/workspace_engine.hpp"
 
 namespace tribios {
 
 struct ProjectPaths {
-  fs::path root;
-  fs::path tribios_dir;
-  fs::path base_dir;
-  fs::path workspaces_dir;
-  fs::path staging_dir;
-  fs::path database;
-  fs::path socket;
-  fs::path mount_point;
-  fs::path log;
+  std::filesystem::path root;
+  std::filesystem::path tribios_dir;
+  std::filesystem::path base_dir;
+  std::filesystem::path workspaces_dir;
+  std::filesystem::path staging_dir;
+  std::filesystem::path database;
+  std::filesystem::path socket;
+  std::filesystem::path mount_point;
+  std::filesystem::path log;
 
-  static ProjectPaths from_project_root(const fs::path& project_root);
+  static ProjectPaths from_project_root(const std::filesystem::path& project_root);
 };
 
 struct CreateResult {
   std::string name;
   std::string branch;
   std::int64_t create_us = 0;
-  fs::path path;
+  std::filesystem::path path;
 };
 
 struct RemoveResult {
@@ -49,11 +49,11 @@ class ProjectManager {
   ~ProjectManager();
 
   // Configures a Project and captures its single Base state.
-  static Outcome<CaptureStats> configure(const fs::path& project_root,
-                                         const fs::path& mount_point, bool force);
+  static Outcome<CaptureStats> configure(const std::filesystem::path& project_root,
+                                         const std::filesystem::path& mount_point, bool force);
   // Opens a configured Project, bringing back every persisted Workspace.
   static Outcome<std::unique_ptr<ProjectManager>> open_configured_project(
-      const fs::path& project_root);
+      const std::filesystem::path& project_root);
 
   const ProjectPaths& project_paths() const { return paths_; }
   const ProjectRecord& project_record() const { return record_; }
@@ -70,7 +70,7 @@ class ProjectManager {
   ProjectManager(ProjectPaths paths, ProjectRecord record, std::unique_ptr<MetadataStore> store)
       : paths_(std::move(paths)), record_(std::move(record)), store_(std::move(store)) {}
 
-  fs::path workspace_upper_directory(const std::string& name) const;
+  std::filesystem::path workspace_upper_directory(const std::string& name) const;
   void start_workspace_reclamation(const std::string& name);
 
   ProjectPaths paths_;

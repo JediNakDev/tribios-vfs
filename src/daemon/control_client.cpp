@@ -5,12 +5,13 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <filesystem>
 
 #include "daemon/protocol.hpp"
 
 namespace tribios {
 
-Outcome<std::vector<std::string>> control_request(const fs::path& socket_path,
+Outcome<std::vector<std::string>> control_request(const std::filesystem::path& socket_path,
                                                   const std::vector<std::string>& request) {
   const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return error("cannot create control socket");

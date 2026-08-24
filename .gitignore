@@ -1,4 +1,5 @@
-build/
+build*/
+.cache/
 bench/results/
 compile_commands.json
 .tribios/
