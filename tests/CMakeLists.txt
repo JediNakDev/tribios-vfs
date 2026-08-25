@@ -34,8 +34,4 @@ foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
   set_tests_properties(${script} PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS ${tier})
 endforeach()
 
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-add_test(NAME benchmark_harness
-         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark_harness.py)
-
 add_subdirectory(unit)

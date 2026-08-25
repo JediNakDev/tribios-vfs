@@ -415,9 +415,7 @@ std::uint64_t WorkspaceEngine::upper_bytes() const {
        it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
     if (ec) break;
     struct stat st{};
-    if (lstat_path(it->path(), st)) {
-      total += static_cast<std::uint64_t>(st.st_blocks) * 512;
-    }
+    if (lstat_path(it->path(), st)) total += static_cast<std::uint64_t>(st.st_size);
   }
   return total;
 }
