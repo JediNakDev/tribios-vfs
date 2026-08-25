@@ -178,6 +178,7 @@ Outcome<std::unique_ptr<MetadataStore>> MetadataStore::open_database(
     sqlite3_close(db);
     return error("metadata store: " + message);
   }
+  sqlite3_busy_timeout(db, 5000);
   char* schema_error = nullptr;
   if (sqlite3_exec(db, kSchema, nullptr, nullptr, &schema_error) != SQLITE_OK) {
     const std::string message = schema_error == nullptr ? "cannot create schema" : schema_error;
@@ -207,6 +208,7 @@ Outcome<std::unique_ptr<MetadataStore>> MetadataStore::open_database_read_only(
     sqlite3_close(db);
     return error("metadata store: " + message);
   }
+  sqlite3_busy_timeout(db, 5000);
   sqlite3_stmt* version = prepare_bound_statement(
       db, "SELECT version FROM metadata_format WHERE id = 1", {});
   if (version == nullptr || sqlite3_step(version) != SQLITE_ROW ||

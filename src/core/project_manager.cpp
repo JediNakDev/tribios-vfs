@@ -1,13 +1,12 @@
 #include "core/project_manager.hpp"
 
 #include <cctype>
+#include <cstdint>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <system_error>
 #include <unistd.h>
 
@@ -66,6 +65,15 @@ OutcomeVoid sync_tree_durably(const std::filesystem::path& path) {
   return {};
 }
 
+std::uint64_t stable_project_path_hash(const std::string& path) {
+  std::uint64_t hash = 14695981039346656037ULL;
+  for (const unsigned char byte : path) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
 }  // namespace
 
 ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& project_root) {
@@ -80,19 +88,15 @@ ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& projec
   paths.workspaces_dir = paths.tribios_dir / "workspaces";
   paths.staging_dir = paths.tribios_dir / "staging";
   paths.database = paths.tribios_dir / "meta.db";
-  paths.socket = paths.tribios_dir / "control.sock";
   paths.mount_point = paths.tribios_dir / "mnt";
   paths.log = paths.tribios_dir / "daemon.log";
 
-  // Unix sockets have a short path limit, so a deep Project falls back to a
-  // short name in the temporary directory that the CLI derives the same way.
-  if (paths.socket.string().size() >= 100) {
-    const char* tmp = std::getenv("TMPDIR");
-    char name[64];
-    std::snprintf(name, sizeof(name), "tribios-%016llx.sock",
-                  static_cast<unsigned long long>(std::hash<std::string>{}(root.string())));
-    paths.socket = std::filesystem::path(tmp != nullptr ? tmp : "/tmp") / name;
-  }
+  // The socket is ephemeral and must stay below macOS's Unix socket path limit,
+  // even when persistent Project storage and TMPDIR use long SSD paths.
+  char socket_name[64];
+  std::snprintf(socket_name, sizeof(socket_name), "tribios-%016llx.sock",
+                static_cast<unsigned long long>(stable_project_path_hash(root.string())));
+  paths.socket = std::filesystem::path("/tmp") / socket_name;
   return paths;
 }
 

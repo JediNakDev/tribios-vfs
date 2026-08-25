@@ -68,6 +68,7 @@ class WorkspaceEngine {
   Status truncate(std::string_view path, std::uint64_t size);
   Status utimens(std::string_view path, std::int64_t atime, std::int64_t mtime);
 
+  // Allocated backing-store bytes, including upper-tree metadata files.
   std::uint64_t upper_bytes() const;
 
  private:
