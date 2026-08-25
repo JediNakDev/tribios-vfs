@@ -870,3 +870,76 @@ as four unrelated trees, Tribios should treat them as:
 ```
 
 The value of Tribios VFS will come from making this pattern efficient across the full agent workspace lifecycle.
+
+---
+
+## 23. First Prototype (issue #1)
+
+The first prototype is a deliberately naive, throwaway experiment on macOS, tracked in issue #1.
+It exists to produce a measured verdict, not production code, and it must not be merged into `main`.
+
+Naive here means whole-file copy-on-write with nothing clever underneath.
+No chunk deduplication, no content-addressed store, no compression, no reference counting, no garbage collection.
+Private file data lives in ordinary directories on the backing filesystem, and SQLite holds the bookkeeping.
+
+### Structure
+
+```text
+Project (a real Git repository)
+    │
+    │  configure once  ->  capture
+    ▼
+Base state (immutable; includes ignored/untracked content such as node_modules)
+    │
+    ├───────────────┬───────────────┐
+    │               │               │
+ Upper A         Upper B         Upper C        <- sparse, empty at creation
+    │               │               │
+    ▼               ▼               ▼
+/mnt/proj/ws-a  /mnt/proj/ws-b  /mnt/proj/ws-c  <- ordinary paths; git/cmake/ninja work unmodified
+```
+
+### Read and write resolution
+
+```text
+read       -> present in Upper?  -- yes -->  serve from Upper
+                    │
+                    └-- no --> tombstoned?  -- yes -->  ENOENT
+                                   │
+                                   └-- no --> serve from Base (shared, zero copy)
+
+write      -> present in Upper?  -- yes -->  write in place
+                    │
+                    └-- no --> copy the whole file up, then write
+
+create     -> Upper only
+delete     -> persistent tombstone in SQLite; Base untouched
+rename     -> private to the workspace, same tombstone mechanism
+unsupported-> explicit error, never a silent approximation
+```
+
+### Lifecycle
+
+```text
+tribios configure   ->  capture Base state (timed separately from creation)
+tribios create ws   ->  insert record + git worktree --no-checkout
+                        no traversal of the Base state
+                        private branch, HEAD, and index; shared object database and refs
+daemon restart      ->  remount every persisted workspace; identical visible state
+tribios remove ws   ->  [1] logical: hide the workspace, commit removed state, return
+                        [2] physical: reclaim the upper tree asynchronously, reported separately
+```
+
+Crash consistency during an interrupted mutating operation is out of scope for this prototype and is specified in issue #2.
+
+### Pass or fail gates
+
+The fixture is a reproducibly generated Git project of 100,000 files and roughly 2 GiB of logical data, including ignored dependency content.
+Every case is measured for one workspace and for eight concurrent workspaces, against a full directory copy that reproduces the same contents.
+
+- zero isolation, persistence, Git, build, and test failures
+- median workspace creation and median logical removal each at least 10 times faster than the full-copy baseline
+- an untouched workspace consumes no more than 1 percent of the Base-state physical storage
+- median `git status` and representative build/test duration no worse than 1.5 times the native baseline
+
+Missing any gate rejects the design on measurement rather than carrying it forward.
