@@ -44,7 +44,8 @@ No daemon, no FUSE mount, no Git, no sleeps.
 
 Tier 1 is forced-invariant end-to-end tests, under `tests/e2e/`, labeled `invariant`.
 They run before every commit and on every push, with a 60s budget.
-They are `workspace_lifecycle`, `filesystem_semantics`, `isolation`, `deletion_and_tombstones` and `restart_persistence`.
+They include lifecycle, filesystem, isolation, restart, crash-recovery, injected-I/O, seeded-sequence, and mounted-recovery coverage.
+CI runs independent invariant scripts with `ctest --parallel 4` so deterministic restart matrices do not serialize unrelated fixtures.
 
 Tier 2 is designed-decision end-to-end tests, under `tests/e2e/`, labeled `design`.
 They run on every pull request, with a 10 minute budget.

@@ -17,7 +17,16 @@ Outcome<std::string> register_linked_worktree(const std::filesystem::path& proje
                                               const std::filesystem::path& workspace_path,
                                               const std::filesystem::path& staging_dir);
 
-// Drops the worktree administrative state, keeping the branch and its commits.
-void unregister_linked_worktree(const std::filesystem::path& project_root, const std::string& name);
+// Drops the worktree administrative state through Git, keeping the branch and
+// its commits.
+OutcomeVoid unregister_linked_worktree(const std::filesystem::path& project_root,
+                                       const std::filesystem::path& workspace_path);
+
+// Rolls back an interrupted creation, including the branch that operation
+// created.
+OutcomeVoid rollback_linked_worktree_creation(const std::filesystem::path& project_root,
+                                              const std::string& branch,
+                                              const std::filesystem::path& workspace_path,
+                                              const std::filesystem::path& staging_dir);
 
 }  // namespace tribios

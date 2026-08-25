@@ -61,7 +61,7 @@ jobs:
         run: ctest --test-dir build -L unit --output-on-failure --no-tests=error
 
       - name: Run invariant tests
-        run: ctest --test-dir build -L invariant --output-on-failure --no-tests=error
+        run: ctest --test-dir build -L invariant --parallel 4 --output-on-failure --no-tests=error
 
       - name: Run design tests
         run: ctest --test-dir build -L design --output-on-failure --no-tests=error
@@ -112,7 +112,7 @@ jobs:
         run: ctest --test-dir build -L unit --output-on-failure --no-tests=error
 
       - name: Run invariant tests
-        run: ctest --test-dir build -L invariant --output-on-failure --no-tests=error
+        run: ctest --test-dir build -L invariant --parallel 4 --output-on-failure --no-tests=error
 
       - name: Run design tests
         run: ctest --test-dir build -L design --output-on-failure --no-tests=error

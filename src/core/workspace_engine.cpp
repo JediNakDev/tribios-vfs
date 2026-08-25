@@ -6,9 +6,12 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <system_error>
 
+#include "core/fault_injection.hpp"
 #include "core/paths.hpp"
+#include "core/recovery.hpp"
 
 namespace tribios {
 namespace {
@@ -26,6 +29,25 @@ Attr attr_from_stat(const struct stat& st, bool from_upper) {
 
 int last_errno() { return errno != 0 ? errno : EIO; }
 
+bool path_exists_without_following_symlinks(const std::filesystem::path& path) {
+  struct stat st {};
+  return lstat_path(path, st);
+}
+
+int sync_entry_tree(const std::filesystem::path& path) {
+  struct stat st {};
+  if (!lstat_path(path, st)) return last_errno();
+  if (S_ISREG(st.st_mode)) return sync_file_data(path);
+  if (!S_ISDIR(st.st_mode)) return 0;
+
+  std::error_code ec;
+  for (const auto& child : std::filesystem::directory_iterator(path, ec)) {
+    if (ec) return EIO;
+    if (const int synced = sync_entry_tree(child.path()); synced != 0) return synced;
+  }
+  return sync_directory(path);
+}
+
 }  // namespace
 
 WorkspaceEngine::WorkspaceEngine(std::string workspace, std::filesystem::path base_dir,
@@ -38,6 +60,14 @@ WorkspaceEngine::WorkspaceEngine(std::string workspace, std::filesystem::path ba
   // daemon restarts.
   for (auto& path : store_.load_workspace_tombstones(workspace_)) {
     tombstones_.insert(std::move(path));
+  }
+}
+
+WorkspaceEngine::~WorkspaceEngine() {
+  std::lock_guard lock(handles_mutex_);
+  for (const auto& [handle, open] : handles_) {
+    (void)handle;
+    if (open.backing_fd >= 0) ::close(open.backing_fd);
   }
 }
 
@@ -144,82 +174,202 @@ Status WorkspaceEngine::create_missing_upper_parent_directories(const std::strin
     if (::mkdir(upper_path(dir).c_str(), st.st_mode & 07777) != 0 && errno != EEXIST) {
       return fail(last_errno());
     }
+    if (sync_parent_directory(upper_path(dir)) != 0) return fail(EIO);
   }
   return {};
 }
 
-// The first mutation of a shared entry gives this Workspace a private
-// whole-file copy. Directories copy up alone: their children keep resolving
-// through the Base tree until they are mutated themselves.
-Status WorkspaceEngine::copy_visible_entry_to_upper(const std::string& relative) {
+Status WorkspaceEngine::materialize_visible_entry_at(
+    const std::string& relative, const std::filesystem::path& destination) {
   struct stat st{};
-  if (lstat_path(upper_path(relative), st)) return {};
-  if (!base_is_visible(relative) || !lstat_path(base_path(relative), st)) return fail(ENOENT);
-  if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
-
-  const std::filesystem::path from = base_path(relative);
-  const std::filesystem::path to = upper_path(relative);
+  const Layer layer = find_visible_entry_layer(relative, st);
+  if (layer == Layer::Missing) return fail(ENOENT);
+  const std::filesystem::path source =
+      layer == Layer::Upper ? upper_path(relative) : base_path(relative);
   std::error_code ec;
   if (S_ISDIR(st.st_mode)) {
-    if (::mkdir(to.c_str(), st.st_mode & 07777) != 0 && errno != EEXIST) return fail(last_errno());
+    if (::mkdir(destination.c_str(), st.st_mode & 07777) != 0 && errno != EEXIST) {
+      return fail(last_errno());
+    }
+    std::map<std::string, DirEntry> children;
+    merge_visible_directory_entries(relative, children);
+    for (const auto& [name, entry] : children) {
+      (void)entry;
+      if (auto copied = materialize_visible_entry_at(join_relative(relative, name),
+                                                     destination / name);
+          !copied) {
+        return copied;
+      }
+    }
+    const timeval times[2] = {{st.st_atime, 0}, {st.st_mtime, 0}};
+    ::utimes(destination.c_str(), times);
     return {};
   }
   if (S_ISLNK(st.st_mode)) {
-    std::filesystem::create_symlink(std::filesystem::read_symlink(from, ec), to, ec);
+    std::filesystem::create_symlink(std::filesystem::read_symlink(source, ec), destination, ec);
     return ec ? Status(fail(EIO)) : Status{};
   }
-  std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, ec);
+  std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, ec);
   if (ec) return fail(EIO);
-  ::chmod(to.c_str(), st.st_mode & 07777);
+  if (::chmod(destination.c_str(), st.st_mode & 07777) != 0) return fail(last_errno());
+  const timeval times[2] = {{st.st_atime, 0}, {st.st_mtime, 0}};
+  if (::utimes(destination.c_str(), times) != 0) return fail(last_errno());
   return {};
 }
 
-// Renaming a Base-state directory materializes that subtree into this
-// Workspace. The prototype accepts the cost rather than hiding it.
-Status WorkspaceEngine::move_visible_entry_to_upper(const std::string& from,
-                                                    const std::string& to) {
-  struct stat st{};
-  if (find_visible_entry_layer(from, st) == Layer::Missing) return fail(ENOENT);
+Status WorkspaceEngine::publish_staged_operation(
+    RecoveryOperation operation,
+    const std::function<Status(const std::filesystem::path&)>& prepare_stage) {
+  if (const int fault = injected_io_error("journal.write"); fault != 0) return fail(fault);
+  auto operation_id = store_.begin_recovery_operation(operation);
+  if (!operation_id) return fail(EIO);
+  operation.id = *operation_id;
 
-  if (!S_ISDIR(st.st_mode)) {
-    if (auto copied = copy_visible_entry_to_upper(from); !copied) return copied;
-    if (auto parents = create_missing_upper_parent_directories(to); !parents) return parents;
+  const std::filesystem::path workspace_dir = upper_dir_.parent_path();
+  const std::filesystem::path recovery_dir = workspace_dir / "recovery";
+  const std::filesystem::path stage = recovery_dir / std::to_string(operation.id);
+  const std::filesystem::path tribios_dir = workspace_dir.parent_path().parent_path();
+  const std::string context = "operation=" + std::to_string(operation.id) +
+                              " workspace=" + workspace_ + " path=" + operation.path;
+  const auto failpoint = [&](std::string_view suffix) {
+    trigger_failpoint(operation.kind + "." + std::string(suffix), tribios_dir, context);
+  };
+  failpoint("after_journal");
+
+  std::error_code ec;
+  std::filesystem::create_directories(recovery_dir, ec);
+  if (ec || sync_parent_directory(recovery_dir) != 0) {
+    store_.abandon_recovery_operation(operation.id);
+    return fail(ec ? EIO : last_errno());
+  }
+  if (auto prepared = prepare_stage(stage); !prepared) {
+    std::filesystem::remove_all(stage, ec);
+    store_.abandon_recovery_operation(operation.id);
+    return prepared;
+  }
+  if (const int fault = injected_io_error("stage.flush"); fault != 0) {
+    std::filesystem::remove_all(stage, ec);
+    store_.abandon_recovery_operation(operation.id);
+    return fail(fault);
+  }
+  if (const int synced = sync_entry_tree(stage); synced != 0 || sync_directory(recovery_dir) != 0) {
+    std::filesystem::remove_all(stage, ec);
+    store_.abandon_recovery_operation(operation.id);
+    return fail(synced != 0 ? synced : EIO);
+  }
+  failpoint("after_stage_flush");
+
+  if (const int fault = injected_io_error("journal.phase"); fault != 0) {
+    std::filesystem::remove_all(stage, ec);
+    store_.abandon_recovery_operation(operation.id);
+    return fail(fault);
+  }
+  if (auto publishing =
+          store_.set_recovery_operation_phase(operation.id, RecoveryPhase::Publishing);
+      !publishing) {
+    std::filesystem::remove_all(stage, ec);
+    store_.abandon_recovery_operation(operation.id);
+    return fail(EIO);
+  }
+  operation.phase = RecoveryPhase::Publishing;
+  failpoint("before_publish");
+
+  const std::string destination_relative =
+      operation.kind == "rename" ? operation.target : operation.path;
+  const std::filesystem::path destination = upper_path(destination_relative);
+  const auto abandon_before_publication = [&](int fault) -> Status {
+    std::filesystem::remove_all(stage, ec);
+    store_.abandon_recovery_operation(operation.id);
+    return fail(fault);
+  };
+  if (const int fault = injected_io_error("publish.rename"); fault != 0) {
+    return abandon_before_publication(fault);
+  }
+  // Preflight injected flush and final-journal failures before publication so
+  // a reported storage error leaves the old visible state intact.
+  if (const int fault = injected_io_error("publish.directory_flush"); fault != 0) {
+    return abandon_before_publication(fault);
+  }
+  if (const int fault = injected_io_error("journal.finish"); fault != 0) {
+    return abandon_before_publication(fault);
+  }
+  if (::rename(stage.c_str(), destination.c_str()) != 0) {
+    return abandon_before_publication(last_errno());
+  }
+  failpoint("after_publish");
+  if (sync_parent_directory(destination) != 0) return fail(EIO);
+
+  if (operation.kind == "rename") {
+    const std::filesystem::path source = upper_path(operation.path);
+    const bool source_was_materialized = path_exists_without_following_symlinks(source);
+    std::filesystem::remove_all(source, ec);
+    if (ec || (source_was_materialized && sync_parent_directory(source) != 0)) return fail(EIO);
+    failpoint("after_source_remove");
+  }
+
+  if (auto finished = store_.finish_recovery_operation(operation); !finished) return fail(EIO);
+  if (operation.add_path_tombstone) tombstones_.insert(operation.path);
+  if (operation.drop_target_tombstones) {
+    std::erase_if(tombstones_, [&](const std::string& path) {
+      return path == operation.target || path.starts_with(operation.target + "/");
+    });
+  }
+  failpoint("after_metadata_commit");
+  std::filesystem::remove(recovery_dir, ec);
+  return {};
+}
+
+Status WorkspaceEngine::remove_visible_entry_atomically(const std::string& kind,
+                                                        const std::string& relative,
+                                                        bool directory) {
+  struct stat base_stat {};
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = kind;
+  operation.path = relative;
+  operation.add_path_tombstone =
+      base_is_visible(relative) && lstat_path(base_path(relative), base_stat);
+  auto operation_id = store_.begin_recovery_operation(operation);
+  if (!operation_id) return fail(EIO);
+  operation.id = *operation_id;
+
+  const std::filesystem::path tribios_dir = upper_dir_.parent_path().parent_path().parent_path();
+  const std::string context = "operation=" + std::to_string(operation.id) +
+                              " workspace=" + workspace_ + " path=" + relative;
+  trigger_failpoint(kind + ".after_journal", tribios_dir, context);
+  if (auto publishing =
+          store_.set_recovery_operation_phase(operation.id, RecoveryPhase::Publishing);
+      !publishing) {
+    store_.abandon_recovery_operation(operation.id);
+    return fail(EIO);
+  }
+  operation.phase = RecoveryPhase::Publishing;
+  trigger_failpoint(kind + ".before_upper_remove", tribios_dir, context);
+
+  if (path_exists_without_following_symlinks(upper_path(relative))) {
     std::error_code ec;
-    std::filesystem::rename(upper_path(from), upper_path(to), ec);
-    return ec ? Status(fail(EIO)) : Status{};
+    if (directory) {
+      std::filesystem::remove_all(upper_path(relative), ec);
+    } else {
+      std::filesystem::remove(upper_path(relative), ec);
+    }
+    if (ec) {
+      store_.abandon_recovery_operation(operation.id);
+      return fail(EIO);
+    }
+    if (sync_parent_directory(upper_path(relative)) != 0) return fail(EIO);
   }
+  trigger_failpoint(kind + ".after_upper_remove", tribios_dir, context);
 
-  if (auto parents = create_missing_upper_parent_directories(to); !parents) return parents;
-  if (::mkdir(upper_path(to).c_str(), st.st_mode & 07777) != 0 && errno != EEXIST) {
-    return fail(last_errno());
-  }
-  std::map<std::string, DirEntry> children;
-  merge_visible_directory_entries(from, children);
-  for (const auto& [name, entry] : children) {
-    auto moved = move_visible_entry_to_upper(join_relative(from, name), join_relative(to, name));
-    if (!moved) return moved;
-  }
-  return {};
-}
-
-Status WorkspaceEngine::add_tombstone(const std::string& relative) {
-  struct stat st{};
-  if (!base_is_visible(relative) || !lstat_path(base_path(relative), st)) return {};
-  if (!store_.add_tombstone(workspace_, relative)) return fail(EIO);
-  tombstones_.insert(relative);
-  return {};
-}
-
-Status WorkspaceEngine::drop_tombstones_under(const std::string& relative) {
-  if (!store_.remove_tombstones_under(workspace_, relative)) return fail(EIO);
-  std::erase_if(tombstones_, [&](const std::string& path) {
-    return path == relative || path.starts_with(relative + "/");
-  });
+  if (auto finished = store_.finish_recovery_operation(operation); !finished) return fail(EIO);
+  if (operation.add_path_tombstone) tombstones_.insert(relative);
+  trigger_failpoint(kind + ".after_metadata_commit", tribios_dir, context);
   return {};
 }
 
 Result<int> WorkspaceEngine::open_handle(std::string_view path, int flags) {
   const std::string relative = normalize_relative(path);
+  if (relative.empty()) return fail(EISDIR);
   const bool for_writing = (flags & (O_WRONLY | O_RDWR | O_APPEND | O_TRUNC | O_CREAT)) != 0;
   std::unique_lock lock(mutex_);
   struct stat st{};
@@ -229,37 +379,159 @@ Result<int> WorkspaceEngine::open_handle(std::string_view path, int flags) {
     if (auto parents = create_missing_upper_parent_directories(relative); !parents) {
       return std::unexpected(parents.error());
     }
+    RecoveryOperation operation;
+    operation.workspace = workspace_;
+    operation.kind = "create";
+    operation.path = relative;
+    auto created = publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+      const int fd = ::open(stage.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
+      if (fd < 0) return Status(fail(last_errno()));
+      ::close(fd);
+      return Status{};
+    });
+    if (!created) return std::unexpected(created.error());
     layer = Layer::Upper;
   } else if (S_ISDIR(st.st_mode)) {
     return fail(EISDIR);
-  } else if (for_writing && layer == Layer::Base) {
-    if (auto copied = copy_visible_entry_to_upper(relative); !copied) {
-      return std::unexpected(copied.error());
+  } else if ((flags & O_CREAT) != 0 && (flags & O_EXCL) != 0) {
+    return fail(EEXIST);
+  }
+
+  if (for_writing && (flags & O_TRUNC) != 0) {
+    if (auto parents = create_missing_upper_parent_directories(relative); !parents) {
+      return std::unexpected(parents.error());
     }
+    RecoveryOperation operation;
+    operation.workspace = workspace_;
+    operation.kind = "truncate";
+    operation.path = relative;
+    auto truncated = publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+      if (auto copied = materialize_visible_entry_at(relative, stage); !copied) return copied;
+      if (::truncate(stage.c_str(), 0) != 0) return Status(fail(last_errno()));
+      return Status{};
+    });
+    if (!truncated) return std::unexpected(truncated.error());
     layer = Layer::Upper;
   }
-  const int fd = ::open((layer == Layer::Base ? base_path(relative) : upper_path(relative)).c_str(),
-                        flags, 0644);
-  if (fd < 0) return fail(last_errno());
-  return fd;
+
+  int backing_flags = flags & ~(O_CREAT | O_EXCL | O_TRUNC);
+  const std::filesystem::path backing_path =
+      layer == Layer::Base ? base_path(relative) : upper_path(relative);
+  if (layer == Layer::Base && for_writing) backing_flags = O_RDONLY;
+  const int backing_fd = ::open(backing_path.c_str(), backing_flags, 0644);
+  if (backing_fd < 0) return fail(last_errno());
+
+  std::lock_guard handles_lock(handles_mutex_);
+  const int handle = next_handle_++;
+  handles_.emplace(handle, OpenHandle{backing_fd, flags, relative});
+  return handle;
 }
 
 Result<std::size_t> WorkspaceEngine::read_handle(int fd, char* buffer, std::size_t size,
                                                  std::uint64_t offset) {
-  const ssize_t n = ::pread(fd, buffer, size, static_cast<off_t>(offset));
+  std::lock_guard lock(handles_mutex_);
+  auto found = handles_.find(fd);
+  if (found == handles_.end()) return fail(EBADF);
+  const ssize_t n = ::pread(found->second.backing_fd, buffer, size, static_cast<off_t>(offset));
   if (n < 0) return fail(last_errno());
   return static_cast<std::size_t>(n);
 }
 
 Result<std::size_t> WorkspaceEngine::write_handle(int fd, const char* buffer, std::size_t size,
                                                   std::uint64_t offset) {
-  const ssize_t n = ::pwrite(fd, buffer, size, static_cast<off_t>(offset));
-  if (n < 0) return fail(last_errno());
-  return static_cast<std::size_t>(n);
+  std::unique_lock lock(mutex_);
+  std::lock_guard handles_lock(handles_mutex_);
+  auto found = handles_.find(fd);
+  if (found == handles_.end()) return fail(EBADF);
+  const int access_mode = found->second.flags & O_ACCMODE;
+  if (access_mode == O_RDONLY) return fail(EBADF);
+
+  const std::string relative = found->second.relative;
+  if (auto parents = create_missing_upper_parent_directories(relative); !parents) {
+    return std::unexpected(parents.error());
+  }
+  std::size_t accepted = 0;
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "write";
+  operation.path = relative;
+  auto written = publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    if (auto copied = materialize_visible_entry_at(relative, stage); !copied) return copied;
+    const int stage_fd = ::open(stage.c_str(), O_WRONLY);
+    if (stage_fd < 0) return Status(fail(last_errno()));
+    const std::size_t write_size = injected_short_write_size(size);
+    const ssize_t count = ::pwrite(stage_fd, buffer, write_size, static_cast<off_t>(offset));
+    const int write_error = count < 0 ? last_errno() : 0;
+    ::close(stage_fd);
+    if (count < 0) return Status(fail(write_error));
+    accepted = static_cast<std::size_t>(count);
+    return Status{};
+  });
+  if (!written) return std::unexpected(written.error());
+
+  ::close(found->second.backing_fd);
+  const int reopen_flags = found->second.flags & ~(O_CREAT | O_EXCL | O_TRUNC);
+  found->second.backing_fd = ::open(upper_path(relative).c_str(), reopen_flags, 0644);
+  if (found->second.backing_fd < 0) return fail(last_errno());
+  return accepted;
+}
+
+Status WorkspaceEngine::fsync_handle(int fd, bool data_only) {
+  std::lock_guard lock(handles_mutex_);
+  auto found = handles_.find(fd);
+  if (found == handles_.end()) return fail(EBADF);
+#ifdef __APPLE__
+  (void)data_only;
+  const int synced = ::fcntl(found->second.backing_fd, F_FULLFSYNC);
+#else
+  const int synced = data_only ? ::fdatasync(found->second.backing_fd) :
+                                 ::fsync(found->second.backing_fd);
+#endif
+  if (synced != 0) return fail(last_errno());
+  struct stat upper_stat {};
+  if (lstat_path(upper_path(found->second.relative), upper_stat) &&
+      sync_parent_directory(upper_path(found->second.relative)) != 0) {
+    return fail(EIO);
+  }
+  return {};
+}
+
+Status WorkspaceEngine::fsync_path(std::string_view path, bool data_only, bool directory) {
+  const std::string relative = normalize_relative(path);
+  std::shared_lock lock(mutex_);
+  struct stat st {};
+  const Layer layer = find_visible_entry_layer(relative, st);
+  if (layer == Layer::Missing) return fail(ENOENT);
+  if (directory != S_ISDIR(st.st_mode)) return fail(directory ? ENOTDIR : EISDIR);
+
+  const std::filesystem::path visible_path =
+      layer == Layer::Upper ? upper_path(relative) : base_path(relative);
+  int synced = 0;
+  if (directory) {
+    synced = sync_directory(visible_path);
+  } else {
+#ifdef __APPLE__
+    (void)data_only;
+    synced = sync_file_data(visible_path);
+#else
+    const int fd = ::open(visible_path.c_str(), O_RDONLY);
+    if (fd < 0) return fail(last_errno());
+    const int result = data_only ? ::fdatasync(fd) : ::fsync(fd);
+    synced = result == 0 ? 0 : last_errno();
+    ::close(fd);
+#endif
+  }
+  if (synced != 0) return fail(synced);
+  if (layer == Layer::Upper && sync_parent_directory(visible_path) != 0) return fail(EIO);
+  return {};
 }
 
 void WorkspaceEngine::close_handle(int fd) {
-  if (fd >= 0) ::close(fd);
+  std::lock_guard lock(handles_mutex_);
+  auto found = handles_.find(fd);
+  if (found == handles_.end()) return;
+  if (found->second.backing_fd >= 0) ::close(found->second.backing_fd);
+  handles_.erase(found);
 }
 
 Result<std::string> WorkspaceEngine::read_file(std::string_view path, std::uint64_t size,
@@ -290,10 +562,16 @@ Status WorkspaceEngine::create(std::string_view path, mode_t mode) {
   struct stat st{};
   if (find_visible_entry_layer(relative, st) != Layer::Missing) return fail(EEXIST);
   if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
-  const int fd = ::open(upper_path(relative).c_str(), O_CREAT | O_EXCL | O_WRONLY, mode & 07777);
-  if (fd < 0) return fail(last_errno());
-  ::close(fd);
-  return {};
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "create";
+  operation.path = relative;
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    const int fd = ::open(stage.c_str(), O_CREAT | O_EXCL | O_WRONLY, mode & 07777);
+    if (fd < 0) return Status(fail(last_errno()));
+    ::close(fd);
+    return Status{};
+  });
 }
 
 Status WorkspaceEngine::mkdir(std::string_view path, mode_t mode) {
@@ -303,9 +581,15 @@ Status WorkspaceEngine::mkdir(std::string_view path, mode_t mode) {
   struct stat st{};
   if (find_visible_entry_layer(relative, st) != Layer::Missing) return fail(EEXIST);
   if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "mkdir";
+  operation.path = relative;
   // Any tombstone on this path stays: the new directory starts empty.
-  if (::mkdir(upper_path(relative).c_str(), mode & 07777) != 0) return fail(last_errno());
-  return {};
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    if (::mkdir(stage.c_str(), mode & 07777) != 0) return Status(fail(last_errno()));
+    return Status{};
+  });
 }
 
 Status WorkspaceEngine::unlink(std::string_view path) {
@@ -315,10 +599,7 @@ Status WorkspaceEngine::unlink(std::string_view path) {
   struct stat st{};
   if (find_visible_entry_layer(relative, st) == Layer::Missing) return fail(ENOENT);
   if (S_ISDIR(st.st_mode)) return fail(EISDIR);
-  if (lstat_path(upper_path(relative), st) && ::unlink(upper_path(relative).c_str()) != 0) {
-    return fail(last_errno());
-  }
-  return add_tombstone(relative);
+  return remove_visible_entry_atomically("unlink", relative, false);
 }
 
 Status WorkspaceEngine::rmdir(std::string_view path) {
@@ -331,10 +612,7 @@ Status WorkspaceEngine::rmdir(std::string_view path) {
   std::map<std::string, DirEntry> children;
   merge_visible_directory_entries(relative, children);
   if (!children.empty()) return fail(ENOTEMPTY);
-  if (lstat_path(upper_path(relative), st) && ::rmdir(upper_path(relative).c_str()) != 0) {
-    return fail(last_errno());
-  }
-  return add_tombstone(relative);
+  return remove_visible_entry_atomically("rmdir", relative, true);
 }
 
 Status WorkspaceEngine::rename(std::string_view from_path, std::string_view to_path) {
@@ -345,21 +623,31 @@ Status WorkspaceEngine::rename(std::string_view from_path, std::string_view to_p
   if (to.starts_with(from + "/")) return fail(EINVAL);
 
   std::unique_lock lock(mutex_);
-  struct stat st{};
-  if (find_visible_entry_layer(from, st) == Layer::Missing) return fail(ENOENT);
-  if (find_visible_entry_layer(to, st) != Layer::Missing) {
-    if (S_ISDIR(st.st_mode)) return fail(EISDIR);
-    if (lstat_path(upper_path(to), st)) ::unlink(upper_path(to).c_str());
-    if (auto hidden = add_tombstone(to); !hidden) return hidden;
+  struct stat source_stat {};
+  if (find_visible_entry_layer(from, source_stat) == Layer::Missing) return fail(ENOENT);
+  struct stat destination_stat {};
+  if (find_visible_entry_layer(to, destination_stat) != Layer::Missing) {
+    if (S_ISDIR(source_stat.st_mode) && !S_ISDIR(destination_stat.st_mode)) return fail(ENOTDIR);
+    if (!S_ISDIR(source_stat.st_mode) && S_ISDIR(destination_stat.st_mode)) return fail(EISDIR);
+    if (S_ISDIR(destination_stat.st_mode)) {
+      std::map<std::string, DirEntry> destination_children;
+      merge_visible_directory_entries(to, destination_children);
+      if (!destination_children.empty()) return fail(ENOTEMPTY);
+    }
   }
+  if (auto parents = create_missing_upper_parent_directories(to); !parents) return parents;
 
-  if (auto moved = move_visible_entry_to_upper(from, to); !moved) return moved;
-  // The destination now holds the moved content, so nothing there stays hidden.
-  if (auto dropped = drop_tombstones_under(to); !dropped) return dropped;
-
-  std::error_code ec;
-  std::filesystem::remove_all(upper_path(from), ec);
-  return add_tombstone(from);
+  struct stat base_stat {};
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "rename";
+  operation.path = from;
+  operation.target = to;
+  operation.add_path_tombstone = base_is_visible(from) && lstat_path(base_path(from), base_stat);
+  operation.drop_target_tombstones = true;
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    return materialize_visible_entry_at(from, stage);
+  });
 }
 
 Status WorkspaceEngine::symlink(std::string_view target, std::string_view link_path) {
@@ -369,18 +657,33 @@ Status WorkspaceEngine::symlink(std::string_view target, std::string_view link_p
   struct stat st{};
   if (find_visible_entry_layer(relative, st) != Layer::Missing) return fail(EEXIST);
   if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
-  if (::symlink(std::string(target).c_str(), upper_path(relative).c_str()) != 0) {
-    return fail(last_errno());
-  }
-  return {};
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "symlink";
+  operation.path = relative;
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    if (::symlink(std::string(target).c_str(), stage.c_str()) != 0) {
+      return Status(fail(last_errno()));
+    }
+    return Status{};
+  });
 }
 
 Status WorkspaceEngine::chmod(std::string_view path, mode_t mode) {
   const std::string relative = normalize_relative(path);
   std::unique_lock lock(mutex_);
-  if (auto copied = copy_visible_entry_to_upper(relative); !copied) return copied;
-  if (::chmod(upper_path(relative).c_str(), mode & 07777) != 0) return fail(last_errno());
-  return {};
+  struct stat st {};
+  if (find_visible_entry_layer(relative, st) == Layer::Missing) return fail(ENOENT);
+  if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "chmod";
+  operation.path = relative;
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    if (auto copied = materialize_visible_entry_at(relative, stage); !copied) return copied;
+    if (::chmod(stage.c_str(), mode & 07777) != 0) return Status(fail(last_errno()));
+    return Status{};
+  });
 }
 
 Status WorkspaceEngine::truncate(std::string_view path, std::uint64_t size) {
@@ -390,20 +693,37 @@ Status WorkspaceEngine::truncate(std::string_view path, std::uint64_t size) {
   const Layer layer = find_visible_entry_layer(relative, st);
   if (layer == Layer::Missing) return fail(ENOENT);
   if (S_ISDIR(st.st_mode)) return fail(EISDIR);
-  if (auto copied = copy_visible_entry_to_upper(relative); !copied) return copied;
-  if (::truncate(upper_path(relative).c_str(), static_cast<off_t>(size)) != 0) {
-    return fail(last_errno());
-  }
-  return {};
+  if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "truncate";
+  operation.path = relative;
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    if (auto copied = materialize_visible_entry_at(relative, stage); !copied) return copied;
+    if (::truncate(stage.c_str(), static_cast<off_t>(size)) != 0) {
+      return Status(fail(last_errno()));
+    }
+    return Status{};
+  });
 }
 
 Status WorkspaceEngine::utimens(std::string_view path, std::int64_t atime, std::int64_t mtime) {
   const std::string relative = normalize_relative(path);
   std::unique_lock lock(mutex_);
-  if (auto copied = copy_visible_entry_to_upper(relative); !copied) return copied;
-  const timeval times[2] = {{static_cast<time_t>(atime), 0}, {static_cast<time_t>(mtime), 0}};
-  if (::utimes(upper_path(relative).c_str(), times) != 0) return fail(last_errno());
-  return {};
+  struct stat st {};
+  if (find_visible_entry_layer(relative, st) == Layer::Missing) return fail(ENOENT);
+  if (auto parents = create_missing_upper_parent_directories(relative); !parents) return parents;
+  RecoveryOperation operation;
+  operation.workspace = workspace_;
+  operation.kind = "utimens";
+  operation.path = relative;
+  return publish_staged_operation(operation, [&](const std::filesystem::path& stage) {
+    if (auto copied = materialize_visible_entry_at(relative, stage); !copied) return copied;
+    const timeval times[2] = {{static_cast<time_t>(atime), 0},
+                              {static_cast<time_t>(mtime), 0}};
+    if (::utimes(stage.c_str(), times) != 0) return Status(fail(last_errno()));
+    return Status{};
+  });
 }
 
 std::uint64_t WorkspaceEngine::upper_bytes() const {

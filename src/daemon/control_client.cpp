@@ -42,11 +42,12 @@ Outcome<std::vector<std::string>> control_request(const std::filesystem::path& s
     buffer.append(chunk, static_cast<std::size_t>(n));
   }
   ::close(fd);
+  if (buffer.empty()) return error("empty reply from daemon");
   auto fields = decode_message(buffer);
-  if (fields.empty()) return error("empty reply from daemon");
   if (fields[0] == "ERR") {
     return error(fields.size() > 1 ? fields[1] : "unknown daemon error");
   }
+  if (fields[0] != "OK") return error("malformed reply from daemon");
   fields.erase(fields.begin());
   return fields;
 }

@@ -257,9 +257,28 @@ int tri_listxattr(const char*, char*, size_t) { return -ENOTSUP; }
 int tri_removexattr(const char*, const char*) { return -ENOTSUP; }
 int tri_lock(const char*, struct fuse_file_info*, int, struct flock*) { return -ENOTSUP; }
 
-int tri_fsync(const char*, int, struct fuse_file_info* info) {
-  if (info != nullptr && info->fh != 0) ::fsync(static_cast<int>(info->fh));
-  return 0;
+int tri_fsync(const char* path, int data_only, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
+  if (engine == nullptr) return -ENOENT;
+  auto status = engine->fsync_handle(static_cast<int>(info->fh), data_only != 0);
+  return status ? 0 : -status.error();
+}
+
+int tri_flush(const char* path, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
+  if (engine == nullptr) return -ENOENT;
+  auto status = engine->fsync_handle(static_cast<int>(info->fh), false);
+  return status ? 0 : -status.error();
+}
+
+int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
+  const ViewPath view = parse_project_view_path(path);
+  auto engine = find_workspace_engine_for_view_path(view);
+  if (engine == nullptr) return -ENOENT;
+  auto status = engine->fsync_path(view.relative, data_only != 0, true);
+  return status ? 0 : -status.error();
 }
 
 fuse_operations create_fuse_operations() {
@@ -288,7 +307,9 @@ fuse_operations create_fuse_operations() {
   ops.listxattr = tri_listxattr;
   ops.removexattr = tri_removexattr;
   ops.lock = tri_lock;
+  ops.flush = tri_flush;
   ops.fsync = tri_fsync;
+  ops.fsyncdir = tri_fsyncdir;
   return ops;
 }
 

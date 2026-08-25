@@ -6,6 +6,7 @@
 
 #include "core/paths.hpp"
 #include "core/proc.hpp"
+#include "core/recovery.hpp"
 
 namespace tribios {
 namespace {
@@ -47,7 +48,11 @@ Outcome<std::string> register_linked_worktree(const std::filesystem::path& proje
 
   // Point the administrative state at the mounted Workspace, where Git will
   // find the worktree from now on, and drop the staging directory.
-  std::ofstream(admin_dir / "gitdir") << (workspace_path / kGitDirName).string() << "\n";
+  {
+    std::ofstream gitdir(admin_dir / "gitdir", std::ios::trunc);
+    gitdir << (workspace_path / kGitDirName).string() << "\n";
+    if (!gitdir) return error("cannot update the linked-worktree gitdir");
+  }
   std::filesystem::remove_all(staging_dir, ec);
 
   // `--no-checkout` also leaves the index empty, which would make Git report
@@ -61,14 +66,57 @@ Outcome<std::string> register_linked_worktree(const std::filesystem::path& proje
     if (!populated.ok()) return error("git read-tree failed: " + populated.output);
   }
 
+  for (const char* name : {"HEAD", "commondir", "gitdir", "index"}) {
+    const std::filesystem::path file = admin_dir / name;
+    if (std::filesystem::is_regular_file(file, ec) && sync_file_data(file) != 0) {
+      return error("cannot flush Git linked-worktree file " + file.string());
+    }
+  }
+  if (sync_directory(admin_dir) != 0 || sync_parent_directory(admin_dir) != 0) {
+    return error("cannot flush Git linked-worktree administrative directory");
+  }
+  const std::filesystem::path branch_ref = project_root / kGitDirName / "refs" / "heads" / branch;
+  if (std::filesystem::is_regular_file(branch_ref, ec) &&
+      (sync_file_data(branch_ref) != 0 || sync_parent_directory(branch_ref) != 0)) {
+    return error("cannot flush Git branch " + branch);
+  }
+
   return "gitdir: " + admin_dir.string() + "\n";
 }
 
-void unregister_linked_worktree(const std::filesystem::path& project_root,
-                                const std::string& name) {
+OutcomeVoid unregister_linked_worktree(const std::filesystem::path& project_root,
+                                       const std::filesystem::path& workspace_path) {
+  auto removed = run_process_and_capture_output(
+      {"git", "-C", project_root.string(), "worktree", "remove", "--force",
+       workspace_path.string()});
+  if (!removed.ok() && removed.output.find("is not a working tree") == std::string::npos &&
+      removed.output.find("is not a working tree directory") == std::string::npos) {
+    return error("git worktree remove failed: " + removed.output);
+  }
+  const std::filesystem::path worktrees = project_root / kGitDirName / "worktrees";
   std::error_code ec;
-  std::filesystem::remove_all(project_root / kGitDirName / "worktrees" / name, ec);
-  run_process_and_capture_output({"git", "-C", project_root.string(), "worktree", "prune"});
+  if (std::filesystem::is_directory(worktrees, ec) && sync_directory(worktrees) != 0) {
+    return error("cannot flush Git linked-worktree registry");
+  }
+  if (sync_directory(project_root / kGitDirName) != 0) {
+    return error("cannot flush Git administrative directory");
+  }
+  return {};
+}
+
+OutcomeVoid rollback_linked_worktree_creation(const std::filesystem::path& project_root,
+                                              const std::string& branch,
+                                              const std::filesystem::path& workspace_path,
+                                              const std::filesystem::path& staging_dir) {
+  auto remove_workspace = unregister_linked_worktree(project_root, workspace_path);
+  auto remove_staging = unregister_linked_worktree(project_root, staging_dir);
+  if (!remove_workspace && !remove_staging) return remove_workspace;
+  auto deleted = run_process_and_capture_output(
+      {"git", "-C", project_root.string(), "branch", "-D", branch});
+  if (!deleted.ok() && deleted.output.find("not found") == std::string::npos) {
+    return error("git branch rollback failed: " + deleted.output);
+  }
+  return {};
 }
 
 }  // namespace tribios

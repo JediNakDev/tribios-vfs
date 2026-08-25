@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(tribios_vfs_prototype LANGUAGES CXX)
-
-# THROWAWAY PROTOTYPE. See docs/prototype/README.md.
+project(tribios_vfs LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +13,8 @@ add_library(tribios_core STATIC
   src/core/paths.cpp
   src/core/proc.cpp
   src/core/metadata_store.cpp
+  src/core/recovery.cpp
+  src/core/fault_injection.cpp
   src/core/base_capture.cpp
   src/core/workspace_engine.cpp
   src/core/git_worktree.cpp
@@ -56,7 +56,7 @@ else()
   else()
     pkg_check_modules(FUSE3 fuse3)
     if(FUSE3_FOUND)
-      message(WARNING "tribios: found FUSE 3 only; this prototype needs the FUSE 2.x API "
+      message(WARNING "tribios: found FUSE 3 only; Tribios needs the FUSE 2.x API "
                       "(macfuse or libfuse-dev). Building without mount support.")
     else()
       message(STATUS "tribios: no FUSE backend found, building without mount support")

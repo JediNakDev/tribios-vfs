@@ -71,7 +71,7 @@ class ProjectManager {
       : paths_(std::move(paths)), record_(std::move(record)), store_(std::move(store)) {}
 
   std::filesystem::path workspace_upper_directory(const std::string& name) const;
-  void start_workspace_reclamation(const std::string& name);
+  void start_workspace_reclamation(const std::string& name, std::int64_t operation_id);
 
   ProjectPaths paths_;
   ProjectRecord record_;

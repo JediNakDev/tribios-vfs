@@ -24,7 +24,7 @@ struct ProjectRecord {
   std::int64_t base_bytes = 0;
 };
 
-enum class WorkspaceState { Active, Removed, Reclaimed };
+enum class WorkspaceState { Creating, Active, Removed, Reclaimed };
 
 std::string_view workspace_state_name(WorkspaceState state);
 
@@ -39,12 +39,34 @@ struct WorkspaceRecord {
   std::int64_t reclaim_us = -1;
 };
 
+enum class RecoveryPhase { Prepared, Publishing };
+
+struct RecoveryOperation {
+  std::int64_t id = 0;
+  std::string workspace;
+  std::string kind;
+  std::string path;
+  std::string target;
+  RecoveryPhase phase = RecoveryPhase::Prepared;
+  bool add_path_tombstone = false;
+  bool drop_target_tombstones = false;
+};
+
+struct RecoveryDiagnostic {
+  std::int64_t id = 0;
+  std::int64_t created_at = 0;
+  std::string project;
+  std::string message;
+};
+
 // Project records, Workspace records, lifecycle state and tombstones. Private
 // file data lives in ordinary directories, never here.
 class MetadataStore {
  public:
   ~MetadataStore();
   static Outcome<std::unique_ptr<MetadataStore>> open_database(
+      const std::filesystem::path& database_path);
+  static Outcome<std::unique_ptr<MetadataStore>> open_database_read_only(
       const std::filesystem::path& database_path);
 
   OutcomeVoid save_project_record(const ProjectRecord& record);
@@ -60,6 +82,16 @@ class MetadataStore {
   OutcomeVoid remove_tombstones_under(const std::string& workspace, const std::string& path);
   OutcomeVoid clear_tombstones(const std::string& workspace);
   std::vector<std::string> load_workspace_tombstones(const std::string& workspace);
+
+  Outcome<std::int64_t> begin_recovery_operation(const RecoveryOperation& operation);
+  OutcomeVoid set_recovery_operation_phase(std::int64_t id, RecoveryPhase phase);
+  OutcomeVoid finish_recovery_operation(const RecoveryOperation& operation);
+  OutcomeVoid abandon_recovery_operation(std::int64_t id);
+  Outcome<std::vector<RecoveryOperation>> load_recovery_operations();
+  OutcomeVoid validate_database_integrity();
+  Outcome<std::int64_t> record_recovery_diagnostic(const std::string& project,
+                                                   const std::string& message);
+  Outcome<std::vector<RecoveryDiagnostic>> load_recovery_diagnostics();
 
  private:
   explicit MetadataStore(sqlite3* db) : db_(db) {}

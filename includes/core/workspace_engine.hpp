@@ -4,7 +4,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -39,6 +41,7 @@ class WorkspaceEngine {
  public:
   WorkspaceEngine(std::string workspace, std::filesystem::path base_dir,
                   std::filesystem::path upper_dir, MetadataStore& store);
+  ~WorkspaceEngine();
 
   Result<Attr> getattr(std::string_view path);
   Result<std::vector<DirEntry>> readdir(std::string_view path);
@@ -51,6 +54,8 @@ class WorkspaceEngine {
   Result<std::size_t> read_handle(int fd, char* buffer, std::size_t size, std::uint64_t offset);
   Result<std::size_t> write_handle(int fd, const char* buffer, std::size_t size,
                                    std::uint64_t offset);
+  Status fsync_handle(int fd, bool data_only);
+  Status fsync_path(std::string_view path, bool data_only, bool directory);
   void close_handle(int fd);
 
   Status create(std::string_view path, mode_t mode);
@@ -76,10 +81,19 @@ class WorkspaceEngine {
   void merge_visible_directory_entries(const std::string& relative,
                                        std::map<std::string, DirEntry>& entries) const;
   Status create_missing_upper_parent_directories(const std::string& relative);
-  Status copy_visible_entry_to_upper(const std::string& relative);
-  Status move_visible_entry_to_upper(const std::string& from, const std::string& to);
-  Status add_tombstone(const std::string& relative);
-  Status drop_tombstones_under(const std::string& relative);
+  Status materialize_visible_entry_at(const std::string& relative,
+                                      const std::filesystem::path& destination);
+  Status publish_staged_operation(
+      RecoveryOperation operation,
+      const std::function<Status(const std::filesystem::path&)>& prepare_stage);
+  Status remove_visible_entry_atomically(const std::string& kind,
+                                         const std::string& relative, bool directory);
+
+  struct OpenHandle {
+    int backing_fd = -1;
+    int flags = 0;
+    std::string relative;
+  };
 
   std::string workspace_;
   std::filesystem::path base_dir_;
@@ -87,6 +101,9 @@ class WorkspaceEngine {
   MetadataStore& store_;
   mutable std::shared_mutex mutex_;
   std::set<std::string> tombstones_;
+  std::mutex handles_mutex_;
+  std::map<int, OpenHandle> handles_;
+  int next_handle_ = 1;
 };
 
 }  // namespace tribios
