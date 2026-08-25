@@ -1,0 +1,113 @@
+name: Benchmark
+
+# The measurement run that decides issue #1, following docs/prototype/README.md
+# and docs/prototype/experiment.md exactly.
+#
+# It has to run on macOS with macFUSE, because experiment.md is explicit that
+# macOS is the platform whose measurements decide the issue and that Linux
+# numbers are never substituted for it. macFUSE cannot run on a GitHub-hosted
+# macOS runner (its kernel extension needs manual approval in System Settings
+# plus a reboot, and Reduced Security on Apple Silicon), so this targets a
+# self-hosted macOS runner where a human has already done that once.
+#
+# The job is guarded so the workflow does not fail when no such runner is
+# registered: set the repository variable TRIBIOS_MACOS_BENCH_RUNNER to 'true'
+# once a runner exists, or trigger the workflow by hand with run_benchmark.
+
+on:
+  schedule:
+    # Nightly, 03:00 UTC, on a smaller fixture so the run finishes.
+    - cron: '0 3 * * *'
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      run_benchmark:
+        description: Run the benchmark even if TRIBIOS_MACOS_BENCH_RUNNER is unset
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  macos-benchmark:
+    name: Benchmark on self-hosted macOS
+    if: vars.TRIBIOS_MACOS_BENCH_RUNNER == 'true' || inputs.run_benchmark
+    runs-on: [self-hosted, macOS]
+
+    env:
+      # Nightly uses a smaller fixture than the release-tag run so it finishes.
+      # generate_fixture.py takes --files and --bytes; the release values are the
+      # 100,000 files and 2 GiB experiment.md specifies.
+      FIXTURE_FILES: ${{ github.event_name == 'schedule' && '5000' || '100000' }}
+      FIXTURE_BYTES: ${{ github.event_name == 'schedule' && '104857600' || '2147483648' }}
+      # macFUSE is present and approved on this runner, so a skipped test is a
+      # real failure, not an environment limitation.
+      TRIBIOS_REQUIRE_MOUNT: '1'
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # Kept outside the checkout so no benchmark data lands in the repository.
+      - name: Choose the fixture and scratch locations
+        run: |
+          echo "FIXTURE_PATH=$RUNNER_TEMP/tribios-bench-fixture" >> "$GITHUB_ENV"
+          echo "SCRATCH_PATH=$RUNNER_TEMP/tribios-bench-scratch" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: brew install cmake ninja sqlite pkg-config llvm
+
+      - name: Configure the build
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          # fuse.pc from macFUSE lives outside the default pkg-config path.
+          PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig"
+          export PKG_CONFIG_PATH
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
+            -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -Wl,-rpath,$LLVM_PREFIX/lib/c++"
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Verify the macFUSE backend was found
+        run: grep -q TRIBIOS_HAVE_FUSE build/compile_commands.json
+
+      - name: Generate the fixture
+        run: |
+          rm -rf "$FIXTURE_PATH" "$SCRATCH_PATH"
+          python3 bench/generate_fixture.py "$FIXTURE_PATH" \
+            --files "$FIXTURE_FILES" --bytes "$FIXTURE_BYTES"
+
+      - name: Capture the Base state
+        run: build/tribios configure "$FIXTURE_PATH"
+
+      - name: Start the daemon
+        run: build/tribios --project "$FIXTURE_PATH" daemon start
+
+      # benchmark.py runs the correctness suite itself and evaluates every gate,
+      # exiting non-zero when one fails. Propagating its exit code is the gate.
+      - name: Run the benchmark
+        run: |
+          python3 bench/benchmark.py --cli build/tribios --project "$FIXTURE_PATH" \
+            --scratch "$SCRATCH_PATH" --build-directory build \
+            --output bench/results/latest.json
+
+      - name: Stop the daemon
+        if: always()
+        run: build/tribios --project "$FIXTURE_PATH" daemon stop
+
+      - name: Upload the results file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: bench/results/latest.json
+          if-no-files-found: warn
+
+      - name: Remove the fixture and scratch directories
+        if: always()
+        run: rm -rf "$FIXTURE_PATH" "$SCRATCH_PATH"

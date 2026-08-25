@@ -11,6 +11,17 @@ namespace {
 
 using SqlValue = std::variant<std::string, std::int64_t>;
 
+// SQLite LIKE reads "_" and "%" as wildcards, so an unescaped path containing
+// either would match unrelated siblings. Pairs with an ESCAPE clause.
+std::string escape_like_wildcards(const std::string& text) {
+  std::string escaped;
+  for (char c : text) {
+    if (c == '\\' || c == '%' || c == '_') escaped.push_back('\\');
+    escaped.push_back(c);
+  }
+  return escaped;
+}
+
 constexpr const char* kSchema = R"sql(
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
@@ -234,8 +245,9 @@ OutcomeVoid MetadataStore::add_tombstone(const std::string& workspace, const std
 OutcomeVoid MetadataStore::remove_tombstones_under(const std::string& workspace,
                                                    const std::string& path) {
   return execute_statement_without_rows(
-      db_, mutex_, "DELETE FROM tombstone WHERE workspace = ? AND (path = ? OR path LIKE ?)",
-      {workspace, path, path + "/%"});
+      db_, mutex_,
+      "DELETE FROM tombstone WHERE workspace = ? AND (path = ? OR path LIKE ? ESCAPE '\\')",
+      {workspace, path, escape_like_wildcards(path) + "/%"});
 }
 
 OutcomeVoid MetadataStore::clear_tombstones(const std::string& workspace) {
