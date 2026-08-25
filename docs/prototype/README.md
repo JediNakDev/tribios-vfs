@@ -198,6 +198,23 @@ For a quick end-to-end harness check, generate a smaller fixture and pass
 `--smoke --repetitions 1 --build-repetitions 1`. Smoke mode runs every case but
 marks its report as ineligible for the final issue verdict.
 
+Run the final benchmark detached from the terminal so a terminal closure cannot interrupt it:
+
+```sh
+./bench/start_final_benchmark.sh
+cat /Volumes/PortableSSD/tribios-vfs-benchmark/latest/status.txt
+```
+
+The harness prints progress for every phase and repetition and checkpoints each completed phase in `results.json`.
+Resume an interrupted run by passing its run directory to the detached launcher:
+
+```sh
+./bench/start_final_benchmark.sh --resume /Volumes/PortableSSD/tribios-vfs-benchmark/runs/<run-id>
+```
+
+A checkpoint has `state: running` and is never eligible for the final verdict.
+Only a report with `state: complete` may decide issue #1.
+
 ## Deliberate limits of this prototype
 
 - Unsupported semantics fail explicitly with `ENOTSUP` rather than pretending:

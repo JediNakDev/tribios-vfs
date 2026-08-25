@@ -48,6 +48,40 @@ REQUIRED_GATE_NAMES = [
     for gate in ("create_speedup", "logical_remove_speedup", "git_status_ratio", "build_ratio")
 ]
 
+PHASE_RESULT_KEYS = {
+    "correctness": ["correctness"],
+    "lifecycle concurrency 1": [
+        "workspace_create_concurrency_1",
+        "logical_remove_concurrency_1",
+        "full_copy_create_concurrency_1",
+        "full_copy_delete_concurrency_1",
+    ],
+    "lifecycle concurrency 8": [
+        "workspace_create_concurrency_8",
+        "logical_remove_concurrency_8",
+        "full_copy_create_concurrency_8",
+        "full_copy_delete_concurrency_8",
+    ],
+    "reclamation": ["physical_reclaim", "transient_storage"],
+    "storage": ["storage"],
+    "runtime concurrency 1": [
+        "git_status_workspace_concurrency_1",
+        "git_status_full_copy_concurrency_1",
+        "build_workspace_concurrency_1",
+        "build_full_copy_concurrency_1",
+    ],
+    "runtime concurrency 8": [
+        "git_status_workspace_concurrency_8",
+        "git_status_full_copy_concurrency_8",
+        "build_workspace_concurrency_8",
+        "build_full_copy_concurrency_8",
+    ],
+}
+
+
+def progress(message: str) -> None:
+    print(f"[benchmark] {message}", flush=True)
+
 
 def run(command, **kwargs):
     return subprocess.run(command, check=True, capture_output=True, text=True, **kwargs)
@@ -173,6 +207,10 @@ class Harness:
         baseline_copy, baseline_delete = [], []
 
         for repetition in range(repetitions):
+            progress(
+                f"lifecycle concurrency {concurrency}: repetition "
+                f"{repetition + 1}/{repetitions}"
+            )
             names = [self.unique_name(f"bench-{concurrency}-{repetition}-{index}")
                      for index in range(concurrency)]
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -214,6 +252,7 @@ class Harness:
         # logical removal.
         reclaim_samples, transient_samples = [], []
         for repetition in range(repetitions):
+            progress(f"reclamation: repetition {repetition + 1}/{repetitions}")
             name = self.unique_name(f"reclaim-probe-{repetition}")
             self.tribios("workspace", "create", name)
             self.tribios("fs", "write", name, "src/module0000/file000000.cpp", "x" * 4096, "0")
@@ -289,6 +328,7 @@ class Harness:
 
         baselines = []
         for index in range(concurrency):
+            progress(f"runtime concurrency {concurrency}: baseline copy {index + 1}/{concurrency}")
             destination = self.scratch / self.unique_name(
                 f"runtime-baseline-{concurrency}-{index}")
             destination.mkdir(parents=True, exist_ok=True)
@@ -297,9 +337,10 @@ class Harness:
         return names, paths, baselines
 
     @staticmethod
-    def measure_parallel(operation, paths, repetitions: int, concurrency: int):
+    def measure_parallel(operation, paths, repetitions: int, concurrency: int, label: str):
         samples = []
-        for _ in range(repetitions):
+        for repetition in range(repetitions):
+            progress(f"{label}: repetition {repetition + 1}/{repetitions}")
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
                 samples.extend(pool.map(operation, paths))
         return samples
@@ -338,13 +379,17 @@ class Harness:
 
         names, paths, baselines = self.prepare_runtime_paths(concurrency)
         status_workspace = self.measure_parallel(
-            self.git_status, paths, repetitions, concurrency)
+            self.git_status, paths, repetitions, concurrency,
+            f"git status Workspace concurrency {concurrency}")
         status_baseline = self.measure_parallel(
-            self.git_status, baselines, repetitions, concurrency)
+            self.git_status, baselines, repetitions, concurrency,
+            f"git status baseline concurrency {concurrency}")
         build_workspace = self.measure_parallel(
-            self.build_from_scratch, paths, build_repetitions, concurrency)
+            self.build_from_scratch, paths, build_repetitions, concurrency,
+            f"build Workspace concurrency {concurrency}")
         build_baseline = self.measure_parallel(
-            self.build_from_scratch, baselines, build_repetitions, concurrency)
+            self.build_from_scratch, baselines, build_repetitions, concurrency,
+            f"build baseline concurrency {concurrency}")
 
         self.results[f"git_status_workspace_concurrency_{concurrency}"] = summarize(status_workspace)
         self.results[f"git_status_full_copy_concurrency_{concurrency}"] = summarize(status_baseline)
@@ -506,6 +551,50 @@ def environment(project: Path, base_state):
     }
 
 
+def write_json_atomically(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    os.replace(temporary, path)
+
+
+def benchmark_configuration(arguments):
+    return {
+        "project": str(Path(arguments.project).resolve()),
+        "repetitions": arguments.repetitions,
+        "build_repetitions": arguments.build_repetitions,
+        "smoke": arguments.smoke,
+    }
+
+
+def checkpoint_report(arguments, harness) -> None:
+    write_json_atomically(
+        Path(arguments.output),
+        {
+            "state": "running",
+            "mode": "smoke" if arguments.smoke else "final",
+            "final_verdict_eligible": False,
+            "configuration": benchmark_configuration(arguments),
+            "attempt_ids": harness.attempt_ids,
+            "results": harness.results,
+        },
+    )
+
+
+def phase_is_complete(results, phase: str) -> bool:
+    return all(key in results for key in PHASE_RESULT_KEYS[phase])
+
+
+def load_checkpoint(path: Path, expected_configuration):
+    try:
+        checkpoint = json.loads(path.read_text())
+        if checkpoint["configuration"] != expected_configuration:
+            raise ValueError("resume arguments do not match the checkpoint configuration")
+        return checkpoint["results"], checkpoint.get("attempt_ids", [])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError(f"invalid benchmark checkpoint {path}: {error}") from error
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, help="path to the tribios CLI")
@@ -520,6 +609,11 @@ def parse_arguments():
         "--smoke",
         action="store_true",
         help="run a small harness check that cannot produce the final issue verdict",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume from completed phases in an existing output checkpoint",
     )
     parser.add_argument("--output", default="bench/results/latest.json")
     arguments = parser.parse_args()
@@ -540,6 +634,18 @@ def create_harness(parser, arguments):
     scratch.mkdir(parents=True, exist_ok=True)
     harness = Harness(Path(arguments.cli), Path(arguments.project).resolve(), scratch)
 
+    harness.attempt_ids = []
+    if arguments.resume:
+        output = Path(arguments.output)
+        if not output.is_file():
+            parser.error(f"cannot resume without checkpoint file: {output}")
+        try:
+            harness.results, harness.attempt_ids = load_checkpoint(
+                output, benchmark_configuration(arguments))
+        except ValueError as error:
+            parser.error(str(error))
+    harness.attempt_ids.append(harness.run_id)
+
     space = benchmark_space_requirement(Path(arguments.project).resolve())
     space["available_free_bytes"] = shutil.disk_usage(scratch).free
     if space["available_free_bytes"] < space["required_free_bytes"]:
@@ -559,23 +665,42 @@ def run_benchmark_cases(harness, arguments):
     base_state["base regular files"] = str(
         regular_file_count(Path(arguments.project).resolve() / ".tribios" / "base"))
     harness.results["base_state"] = base_state
-    harness.case_correctness(Path(arguments.build_directory))
-    harness.case_lifecycle(arguments.repetitions, concurrency=1)
-    harness.case_lifecycle(arguments.repetitions, concurrency=8)
-    harness.case_reclamation(arguments.repetitions)
-    harness.case_storage()
-    harness.case_runtime(max(3, arguments.repetitions), arguments.build_repetitions,
-                         concurrency=1)
-    harness.case_runtime(max(3, arguments.repetitions), arguments.build_repetitions,
-                         concurrency=8)
+    checkpoint_report(arguments, harness)
+
+    phases = [
+        ("correctness", lambda: harness.case_correctness(Path(arguments.build_directory))),
+        ("lifecycle concurrency 1",
+         lambda: harness.case_lifecycle(arguments.repetitions, concurrency=1)),
+        ("lifecycle concurrency 8",
+         lambda: harness.case_lifecycle(arguments.repetitions, concurrency=8)),
+        ("reclamation", lambda: harness.case_reclamation(arguments.repetitions)),
+        ("storage", harness.case_storage),
+        ("runtime concurrency 1",
+         lambda: harness.case_runtime(max(3, arguments.repetitions),
+                                      arguments.build_repetitions, concurrency=1)),
+        ("runtime concurrency 8",
+         lambda: harness.case_runtime(max(3, arguments.repetitions),
+                                      arguments.build_repetitions, concurrency=8)),
+    ]
+    for name, action in phases:
+        if phase_is_complete(harness.results, name):
+            progress(f"{name}: already complete, skipping")
+            continue
+        progress(f"{name}: starting")
+        action()
+        checkpoint_report(arguments, harness)
+        progress(f"{name}: complete and checkpointed")
     return base_state
 
 
 def write_report(harness, arguments, base_state):
     run_environment = environment(Path(arguments.project).resolve(), base_state)
     report = {
+        "state": "complete",
         "mode": "smoke" if arguments.smoke else "final",
         "final_verdict_eligible": not arguments.smoke,
+        "configuration": benchmark_configuration(arguments),
+        "attempt_ids": harness.attempt_ids,
         "environment": run_environment,
         "results": harness.results,
         "verdict": evaluate(harness.results, run_environment),
@@ -590,8 +715,7 @@ def write_report(harness, arguments, base_state):
         report["passed"] = all(entry["pass"] for entry in report["verdict"].values())
 
     output = Path(arguments.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2) + "\n")
+    write_json_atomically(output, report)
     print(json.dumps(report["verdict"], indent=2))
     label = "smoke check" if arguments.smoke else "verdict"
     print(f"{label}: {'PASS' if report['passed'] else 'FAIL'} (raw results in {output})")

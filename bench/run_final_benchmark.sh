@@ -7,6 +7,15 @@ if [[ "$PWD" != "$repository_root" ]]; then
   exit 2
 fi
 
+resume_directory=""
+if [[ $# -gt 0 ]]; then
+  if [[ "$1" != "--resume" ]] || [[ $# -ne 2 ]]; then
+    echo "usage: $0 [--resume /path/to/benchmark/run]" >&2
+    exit 2
+  fi
+  resume_directory="$2"
+fi
+
 portable_ssd="/Volumes/PortableSSD"
 if [[ ! -d "$portable_ssd" ]] || ! mount | grep "on $portable_ssd " >/dev/null; then
   echo "PortableSSD is not mounted at $portable_ssd" >&2
@@ -24,9 +33,22 @@ if [[ -n "$unexpected_changes" ]]; then
   exit 2
 fi
 
-run_id="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
 benchmark_root="$portable_ssd/tribios-vfs-benchmark"
-run_directory="$benchmark_root/runs/$run_id"
+if [[ -n "$resume_directory" ]]; then
+  if [[ ! -d "$resume_directory" ]]; then
+    echo "resume directory does not exist: $resume_directory" >&2
+    exit 2
+  fi
+  run_directory="$(cd "$resume_directory" && pwd -P)"
+  case "$run_directory" in
+    "$benchmark_root"/runs/*) ;;
+    *) echo "resume directory must be under $benchmark_root/runs" >&2; exit 2 ;;
+  esac
+  run_id="$(basename "$run_directory")"
+else
+  run_id="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  run_directory="$benchmark_root/runs/$run_id"
+fi
 build_directory="$run_directory/build"
 fixture_path="$run_directory/fixture"
 scratch_path="$run_directory/scratch"
@@ -43,6 +65,17 @@ export TMPDIR="$temporary_path"
 daemon_started=0
 run_completed=0
 benchmark_exit_code=1
+received_signal=""
+
+# shellcheck disable=SC2329  # Invoked through signal traps.
+handle_signal() {
+  received_signal="$1"
+  case "$1" in
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+    HUP) exit 129 ;;
+  esac
+}
 
 # shellcheck disable=SC2329  # Invoked through the EXIT trap.
 finish_run() {
@@ -54,6 +87,9 @@ finish_run() {
   fi
   if [[ "$run_completed" -eq 1 ]]; then
     printf 'COMPLETE\nbenchmark_exit_code=%s\n' "$benchmark_exit_code" > "$status_path"
+  elif [[ -n "$received_signal" ]]; then
+    printf 'ABORTED\nsignal=%s\nscript_exit_code=%s\n' \
+      "$received_signal" "$exit_code" > "$status_path"
   else
     printf 'FAILED\nscript_exit_code=%s\n' "$exit_code" > "$status_path"
   fi
@@ -61,15 +97,22 @@ finish_run() {
   exit "$exit_code"
 }
 trap finish_run EXIT
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+trap 'handle_signal HUP' HUP
 
 printf 'RUNNING\n' > "$status_path"
 echo "Benchmark run: $run_id"
 echo "Repository: $repository_root"
 echo "Commit: $(git rev-parse HEAD)"
 echo "Artifacts: $run_directory"
+if [[ -n "$resume_directory" ]]; then
+  echo "Mode: resume"
+fi
 git status --short
 sw_vers
-system_profiler SPHardwareDataType
+system_profiler SPHardwareDataType |
+  grep -E 'Model Name:|Model Identifier:|Chip:|Total Number of Cores:|Memory:'
 df -h "$portable_ssd"
 
 llvm_prefix="$(brew --prefix llvm)"
@@ -84,22 +127,39 @@ ninja -C "$build_directory"
 ctest --test-dir "$build_directory" -L unit --output-on-failure --no-tests=error
 grep -q TRIBIOS_HAVE_FUSE "$build_directory/compile_commands.json"
 
-python3 "$repository_root/bench/generate_fixture.py" "$fixture_path" \
-  --files 100000 --bytes 2147483648
-"$build_directory/tribios" configure "$fixture_path"
+if [[ -f "$fixture_path/.tribios/meta.db" ]]; then
+  echo "Reusing configured fixture: $fixture_path"
+else
+  python3 "$repository_root/bench/generate_fixture.py" "$fixture_path" \
+    --files 100000 --bytes 2147483648
+  "$build_directory/tribios" configure "$fixture_path"
+fi
+"$build_directory/tribios" --project "$fixture_path" daemon stop >/dev/null 2>&1 || true
 "$build_directory/tribios" --project "$fixture_path" daemon start
 daemon_started=1
 
+benchmark_arguments=(
+  --cli "$build_directory/tribios"
+  --project "$fixture_path"
+  --scratch "$scratch_path"
+  --build-directory "$build_directory"
+  --output "$result_path"
+)
+if [[ -f "$result_path" ]]; then
+  benchmark_arguments+=(--resume)
+fi
+
 set +e
 TRIBIOS_REQUIRE_MOUNT=1 TMPDIR="$temporary_path" \
-  python3 "$repository_root/bench/benchmark.py" \
-    --cli "$build_directory/tribios" \
-    --project "$fixture_path" \
-    --scratch "$scratch_path" \
-    --build-directory "$build_directory" \
-    --output "$result_path"
+  python3 "$repository_root/bench/benchmark.py" "${benchmark_arguments[@]}"
 benchmark_exit_code=$?
 set -e
+
+case "$benchmark_exit_code" in
+  129) received_signal="HUP"; exit 129 ;;
+  130) received_signal="INT"; exit 130 ;;
+  143) received_signal="TERM"; exit 143 ;;
+esac
 
 if [[ ! -f "$result_path" ]]; then
   echo "benchmark exited without writing $result_path" >&2
@@ -114,6 +174,8 @@ from pathlib import Path
 result_path = Path(sys.argv[1])
 ctest_output_path = Path(sys.argv[2])
 report = json.loads(result_path.read_text())
+if report.get("state") != "complete":
+    raise SystemExit("benchmark stopped before completing every phase")
 ctest_output_path.write_text(report["results"]["correctness"]["output"])
 print(f"Final verdict eligible: {report['final_verdict_eligible']}")
 print(f"Verdict: {'PASS' if report['passed'] else 'FAIL'}")

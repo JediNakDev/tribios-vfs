@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -17,6 +19,76 @@ SPEC.loader.exec_module(benchmark)
 
 
 class BenchmarkHarnessTest(unittest.TestCase):
+    def test_checkpoint_is_never_final_verdict_eligible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results.json"
+            arguments = SimpleNamespace(
+                output=str(output),
+                project=directory,
+                repetitions=5,
+                build_repetitions=3,
+                smoke=False,
+            )
+            harness = SimpleNamespace(
+                attempt_ids=["attempt-one"],
+                results={"correctness": {"exit_code": 0}},
+            )
+
+            benchmark.checkpoint_report(arguments, harness)
+
+            checkpoint = json.loads(output.read_text())
+            self.assertEqual("running", checkpoint["state"])
+            self.assertFalse(checkpoint["final_verdict_eligible"])
+            self.assertFalse(Path(str(output) + ".tmp").exists())
+
+    def test_phase_is_complete_only_when_every_result_is_present(self):
+        keys = benchmark.PHASE_RESULT_KEYS["lifecycle concurrency 1"]
+        results = {key: {} for key in keys}
+
+        self.assertTrue(benchmark.phase_is_complete(results, "lifecycle concurrency 1"))
+        results.pop(keys[-1])
+        self.assertFalse(benchmark.phase_is_complete(results, "lifecycle concurrency 1"))
+
+    def test_checkpoint_resume_rejects_different_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results.json"
+            arguments = SimpleNamespace(
+                output=str(output),
+                project=directory,
+                repetitions=5,
+                build_repetitions=3,
+                smoke=False,
+            )
+            harness = SimpleNamespace(attempt_ids=["attempt-one"], results={})
+            benchmark.checkpoint_report(arguments, harness)
+            changed = benchmark.benchmark_configuration(arguments) | {"smoke": True}
+
+            with self.assertRaisesRegex(ValueError, "resume arguments do not match"):
+                benchmark.load_checkpoint(output, changed)
+
+    def test_checkpoint_resume_restores_completed_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results.json"
+            arguments = SimpleNamespace(
+                output=str(output),
+                project=directory,
+                repetitions=5,
+                build_repetitions=3,
+                smoke=False,
+            )
+            expected_results = {"correctness": {"exit_code": 0}}
+            harness = SimpleNamespace(
+                attempt_ids=["attempt-one"],
+                results=expected_results,
+            )
+            benchmark.checkpoint_report(arguments, harness)
+
+            results, attempt_ids = benchmark.load_checkpoint(
+                output, benchmark.benchmark_configuration(arguments))
+
+            self.assertEqual(expected_results, results)
+            self.assertEqual(["attempt-one"], attempt_ids)
+
     def test_missing_measurements_cannot_pass(self):
         run_environment = {
             "platform": "Darwin-test",
