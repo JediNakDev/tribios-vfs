@@ -19,6 +19,7 @@
 namespace tribios {
 
 struct Attr {
+  std::uint64_t ino = 0;
   mode_t mode = 0;
   std::uint64_t size = 0;
   std::uint64_t nlink = 1;
@@ -30,6 +31,7 @@ struct Attr {
 
 struct DirEntry {
   std::string name;
+  std::uint64_t ino = 0;
   mode_t mode = 0;
 };
 
@@ -89,6 +91,10 @@ class WorkspaceEngine {
       const std::function<Status(const std::filesystem::path&)>& prepare_stage);
   Status remove_visible_entry_atomically(const std::string& kind,
                                          const std::string& relative, bool directory);
+  // Sibling Workspaces read the same Base-state files, so a backing inode alone
+  // would report one file under several Workspace paths. Salting per Workspace
+  // keeps each Workspace's inode numbers distinct and stable.
+  std::uint64_t workspace_inode_for(const struct stat& backing) const;
 
   struct OpenHandle {
     int backing_fd = -1;
@@ -97,6 +103,7 @@ class WorkspaceEngine {
   };
 
   std::string workspace_;
+  std::uint64_t inode_salt_ = 0;
   std::filesystem::path base_dir_;
   std::filesystem::path upper_dir_;
   MetadataStore& store_;

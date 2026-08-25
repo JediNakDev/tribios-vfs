@@ -20,11 +20,29 @@ bool lstat_path(const std::filesystem::path& path, struct stat& out) {
   return ::lstat(path.c_str(), &out) == 0;
 }
 
-Attr attr_from_stat(const struct stat& st, bool from_upper) {
-  return Attr{st.st_mode,  static_cast<std::uint64_t>(st.st_size),
-              st.st_nlink, st.st_mtime,
-              st.st_atime, st.st_ctime,
-              from_upper};
+Attr attr_from_stat(const struct stat& st, std::uint64_t ino, bool from_upper) {
+  return Attr{ino,         st.st_mode,  static_cast<std::uint64_t>(st.st_size),
+              st.st_nlink, st.st_mtime, st.st_atime,
+              st.st_ctime, from_upper};
+}
+
+std::uint64_t fnv1a_hash(std::string_view text) {
+  std::uint64_t hash = 14695981039346656037ULL;
+  for (const unsigned char byte : text) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+// The splitmix64 finalizer: it spreads the salted backing inode across the
+// whole 64-bit range so that neighbouring inodes do not collide after mixing.
+std::uint64_t mix_bits(std::uint64_t value) {
+  value ^= value >> 30;
+  value *= 0xbf58476d1ce4e5b9ULL;
+  value ^= value >> 27;
+  value *= 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
 }
 
 int last_errno() { return errno != 0 ? errno : EIO; }
@@ -53,6 +71,7 @@ int sync_entry_tree(const std::filesystem::path& path) {
 WorkspaceEngine::WorkspaceEngine(std::string workspace, std::filesystem::path base_dir,
                                  std::filesystem::path upper_dir, MetadataStore& store)
     : workspace_(std::move(workspace)),
+      inode_salt_(fnv1a_hash(workspace_)),
       base_dir_(std::move(base_dir)),
       upper_dir_(std::move(upper_dir)),
       store_(store) {
@@ -106,7 +125,7 @@ void WorkspaceEngine::merge_visible_directory_entries(
       if (tombstones_.contains(join_relative(relative, name)) || !lstat_path(entry.path(), st)) {
         continue;
       }
-      entries[name] = DirEntry{name, st.st_mode};
+      entries[name] = DirEntry{name, workspace_inode_for(st), st.st_mode};
     }
   }
   ec.clear();
@@ -114,7 +133,9 @@ void WorkspaceEngine::merge_visible_directory_entries(
            upper_path(relative), std::filesystem::directory_options::none, ec)) {
     const std::string name = entry.path().filename().string();
     struct stat st{};
-    if (lstat_path(entry.path(), st)) entries[name] = DirEntry{name, st.st_mode};
+    if (lstat_path(entry.path(), st)) {
+      entries[name] = DirEntry{name, workspace_inode_for(st), st.st_mode};
+    }
   }
 }
 
@@ -124,7 +145,15 @@ Result<Attr> WorkspaceEngine::getattr(std::string_view path) {
   struct stat st{};
   const Layer layer = find_visible_entry_layer(relative, st);
   if (layer == Layer::Missing) return fail(ENOENT);
-  return attr_from_stat(st, layer == Layer::Upper);
+  return attr_from_stat(st, workspace_inode_for(st), layer == Layer::Upper);
+}
+
+// Zero is reserved: a directory entry carrying inode zero reads as a deleted
+// slot, and callers treat a zero inode as "unknown".
+std::uint64_t WorkspaceEngine::workspace_inode_for(const struct stat& backing) const {
+  const std::uint64_t mixed =
+      mix_bits(static_cast<std::uint64_t>(backing.st_ino) + inode_salt_);
+  return mixed == 0 ? 1 : mixed;
 }
 
 Result<std::vector<DirEntry>> WorkspaceEngine::readdir(std::string_view path) {
