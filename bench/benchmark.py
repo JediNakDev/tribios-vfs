@@ -208,7 +208,7 @@ class Harness:
 
         for repetition in range(repetitions):
             progress(
-                f"lifecycle concurrency {concurrency}: repetition "
+                f"lifecycle concurrency {concurrency}: Workspace operations "
                 f"{repetition + 1}/{repetitions}"
             )
             names = [self.unique_name(f"bench-{concurrency}-{repetition}-{index}")
@@ -223,6 +223,10 @@ class Harness:
                       for index in range(concurrency)]
             for copy in copies:
                 copy.mkdir(parents=True, exist_ok=True)
+            progress(
+                f"lifecycle concurrency {concurrency}: full-copy baseline "
+                f"{repetition + 1}/{repetitions}"
+            )
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
                 baseline_copy.extend(pool.map(self.full_copy, copies))
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -239,6 +243,7 @@ class Harness:
         completed = subprocess.run(["ctest", "--test-dir", str(build_directory),
                                     "--output-on-failure"], capture_output=True, text=True)
         output = completed.stdout + completed.stderr
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
         self.results["correctness"] = {
             "exit_code": completed.returncode,
             "failed_tests": output.count("***Failed"),
@@ -687,9 +692,11 @@ def run_benchmark_cases(harness, arguments):
             progress(f"{name}: already complete, skipping")
             continue
         progress(f"{name}: starting")
+        started = time.perf_counter()
         action()
         checkpoint_report(arguments, harness)
-        progress(f"{name}: complete and checkpointed")
+        elapsed = time.perf_counter() - started
+        progress(f"{name}: complete and checkpointed in {elapsed:.1f}s")
     return base_state
 
 

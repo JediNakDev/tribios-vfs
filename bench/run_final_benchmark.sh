@@ -119,22 +119,29 @@ llvm_prefix="$(brew --prefix llvm)"
 sqlite_prefix="$(brew --prefix sqlite)"
 export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$sqlite_prefix/lib/pkgconfig"
 
+echo "[runner] configuring build"
 cmake -S "$repository_root" -B "$build_directory" -G Ninja \
   -DCMAKE_CXX_COMPILER="$llvm_prefix/bin/clang++" \
   -DCMAKE_EXE_LINKER_FLAGS="-L$llvm_prefix/lib/c++ -Wl,-rpath,$llvm_prefix/lib/c++" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+echo "[runner] building"
 ninja -C "$build_directory"
+echo "[runner] running unit tests"
 ctest --test-dir "$build_directory" -L unit --output-on-failure --no-tests=error
+echo "[runner] verifying macFUSE build"
 grep -q TRIBIOS_HAVE_FUSE "$build_directory/compile_commands.json"
 
 if [[ -f "$fixture_path/.tribios/meta.db" ]]; then
-  echo "Reusing configured fixture: $fixture_path"
+  echo "[runner] reusing configured fixture: $fixture_path"
 else
+  echo "[runner] generating final fixture"
   python3 "$repository_root/bench/generate_fixture.py" "$fixture_path" \
     --files 100000 --bytes 2147483648
+  echo "[runner] capturing Base state"
   "$build_directory/tribios" configure "$fixture_path"
 fi
 "$build_directory/tribios" --project "$fixture_path" daemon stop >/dev/null 2>&1 || true
+echo "[runner] starting daemon"
 "$build_directory/tribios" --project "$fixture_path" daemon start
 daemon_started=1
 
@@ -150,6 +157,7 @@ if [[ -f "$result_path" ]]; then
 fi
 
 set +e
+echo "[runner] starting benchmark harness"
 TRIBIOS_REQUIRE_MOUNT=1 TMPDIR="$temporary_path" \
   python3 "$repository_root/bench/benchmark.py" "${benchmark_arguments[@]}"
 benchmark_exit_code=$?
