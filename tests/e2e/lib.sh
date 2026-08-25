@@ -143,7 +143,12 @@ ws_exists() {
   fi
 }
 
-file_mode() { stat -f '%Lp' "$1"; }
+# GNU stat and BSD stat spell "the permission bits" differently.
+if stat --version >/dev/null 2>&1; then
+  file_mode() { stat -c '%a' "$1"; }
+else
+  file_mode() { stat -f '%Lp' "$1"; }
+fi
 
 ws_stat() { # workspace path -> "<kind> <octal mode>"
   if [ "$MOUNTED" = "1" ]; then
