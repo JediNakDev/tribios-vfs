@@ -1,8 +1,20 @@
 ## Agent skills
 
-This repository uses the Matt Pocock engineering skills.
+This repository uses the Matt Pocock engineering skills, always used unslop and karpathy-guidelines if installed.
 Before starting an engineering workflow, verify that the relevant Matt Pocock skills are available.
 If they are unavailable, ask the user to install the Matt Pocock skills bundle before continuing.
+
+## Common mistake to avoid
+
+- When told to implemented, do not verify it by full benchmark or e2e test, it tooks very loang and causes friction in development.
+- You should verify it by small unit test or integration test instead i.e. test that use less than 5 minutes.
+- If needed to verify with full benchmark or e2e test, provide user the command snippet to run.
+  - Setup command in a way that you can access logs and results easily.
+
+## Local environment
+
+Before building, testing, benchmarking, or using machine-specific tooling, read and follow `AGENTS.local.md` if it exists.
+The file contains local-only instructions and must remain uncommitted.
 
 ## Code preferences
 
