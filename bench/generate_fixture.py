@@ -65,11 +65,7 @@ def main() -> int:
         "project(fixture CXX)\n"
         "file(GLOB_RECURSE fixture_sources src/module0000/*.cpp)\n"
         "add_library(fixture STATIC ${fixture_sources})\n"
-        "add_executable(fixture_smoke fixture_smoke.cpp)\n"
-        "enable_testing()\n"
-        "add_test(NAME fixture_smoke COMMAND fixture_smoke)\n"
     )
-    (root / "fixture_smoke.cpp").write_text("int main() { return 0; }\n")
     for path in sorted((root / "src").glob("module0000/*.cpp")):
         path.write_text(f"int {path.stem}() {{ return 1; }}\n")
 

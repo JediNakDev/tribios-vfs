@@ -1,10 +1,11 @@
 #include "core/project_manager.hpp"
 
 #include <cctype>
-#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <system_error>
 
 #include "core/git_worktree.hpp"
@@ -23,15 +24,6 @@ bool is_valid_workspace_name(const std::string& name) {
   return true;
 }
 
-std::uint64_t stable_project_path_hash(const std::string& path) {
-  std::uint64_t hash = 14695981039346656037ULL;
-  for (const unsigned char byte : path) {
-    hash ^= byte;
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 }  // namespace
 
 ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& project_root) {
@@ -46,15 +38,19 @@ ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& projec
   paths.workspaces_dir = paths.tribios_dir / "workspaces";
   paths.staging_dir = paths.tribios_dir / "staging";
   paths.database = paths.tribios_dir / "meta.db";
+  paths.socket = paths.tribios_dir / "control.sock";
   paths.mount_point = paths.tribios_dir / "mnt";
   paths.log = paths.tribios_dir / "daemon.log";
 
-  // The control socket is ephemeral and must work when persistent Project
-  // storage is on a filesystem such as exFAT that cannot host Unix sockets.
-  char socket_name[64];
-  std::snprintf(socket_name, sizeof(socket_name), "tribios-%016llx.sock",
-                static_cast<unsigned long long>(stable_project_path_hash(root.string())));
-  paths.socket = std::filesystem::path("/tmp") / socket_name;
+  // Unix sockets have a short path limit, so a deep Project falls back to a
+  // short name in the temporary directory that the CLI derives the same way.
+  if (paths.socket.string().size() >= 100) {
+    const char* tmp = std::getenv("TMPDIR");
+    char name[64];
+    std::snprintf(name, sizeof(name), "tribios-%016llx.sock",
+                  static_cast<unsigned long long>(std::hash<std::string>{}(root.string())));
+    paths.socket = std::filesystem::path(tmp != nullptr ? tmp : "/tmp") / name;
+  }
   return paths;
 }
 
@@ -180,29 +176,27 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
 }
 
 Outcome<RemoveResult> ProjectManager::remove_workspace(const std::string& name) {
-  std::int64_t logical_remove_us = 0;
+  const std::int64_t started = steady_clock_microseconds();
   {
     std::unique_lock lock(engines_mutex_);
-    auto engine = engines_.find(name);
-    if (engine == engines_.end()) return error("no such active Workspace: " + name);
+    if (!engines_.contains(name)) return error("no such active Workspace: " + name);
+    engines_.erase(name);
+  }
 
-    const std::int64_t started = steady_clock_microseconds();
-    auto record = store_->load_workspace_record(name);
-    if (!record) return error("no Workspace record for " + name);
-    record->state = WorkspaceState::Removed;
-    record->removed_at = current_unix_time_seconds();
-    logical_remove_us = steady_clock_microseconds() - started;
-    record->logical_remove_us = logical_remove_us;
-    record->reclaim_us = -1;
-    if (auto stored = store_->save_workspace_record(*record); !stored) {
-      return std::unexpected(stored.error());
-    }
-
-    engines_.erase(engine);
+  // The Workspace is inaccessible and its removed state is committed before
+  // this returns. Freeing its upper tree happens afterwards.
+  auto record = store_->load_workspace_record(name);
+  if (!record) return error("no Workspace record for " + name);
+  record->state = WorkspaceState::Removed;
+  record->removed_at = current_unix_time_seconds();
+  record->logical_remove_us = steady_clock_microseconds() - started;
+  record->reclaim_us = -1;
+  if (auto stored = store_->save_workspace_record(*record); !stored) {
+    return std::unexpected(stored.error());
   }
 
   start_workspace_reclamation(name);
-  return RemoveResult{name, logical_remove_us};
+  return RemoveResult{name, record->logical_remove_us};
 }
 
 void ProjectManager::start_workspace_reclamation(const std::string& name) {
