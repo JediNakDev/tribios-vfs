@@ -13,6 +13,7 @@ FetchContent_MakeAvailable(Catch2)
 
 add_executable(tribios_unit_tests
   path_normalization_test.cpp
+  project_paths_test.cpp
   control_protocol_framing_test.cpp
   base_capture_exclusion_test.cpp
   tombstone_resolution_test.cpp
