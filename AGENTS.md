@@ -22,6 +22,13 @@ If they are unavailable, ask the user to install the Matt Pocock skills bundle b
 - Put declarations shared by multiple files in the same directory in a private header.
   Expose them publicly only when code outside that directory needs them.
 
+### Tests
+
+Run the tier that matches what you are doing, and never the full suite or the benchmark by reflex.
+Run `ctest -L unit` after every build, and `-L unit`, `-L invariant` and `-L design` before every commit.
+Every new test must be registered in a tier.
+See `TEST.md`.
+
 ### Issue tracker
 
 Track issues in this repository's GitHub Issues.

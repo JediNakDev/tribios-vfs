@@ -18,7 +18,16 @@ MOUNTED=0
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-skip() { echo "SKIP: $*" >&2; exit "$SKIP_EXIT_CODE"; }
+# A skip reports success, which is right on a laptop without a FUSE backend and
+# wrong as a gate. CI sets TRIBIOS_REQUIRE_MOUNT=1 to turn every skip into a
+# failure, including a missing build tool: on a runner that is a broken runner.
+skip() {
+  if [ "${TRIBIOS_REQUIRE_MOUNT:-}" = "1" ]; then
+    fail "TRIBIOS_REQUIRE_MOUNT is set, so skipping is not acceptable: $*"
+  fi
+  echo "SKIP: $*" >&2
+  exit "$SKIP_EXIT_CODE"
+}
 
 assert_eq() {
   local expected="$1" actual="$2" what="${3:-value}"

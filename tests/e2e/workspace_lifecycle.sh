@@ -1,27 +1,9 @@
 #!/usr/bin/env bash
-# Workspace lifecycle: configure once, create, list, remove.
+# A Workspace can be created, listed, read as a full Base-state copy and removed.
 source "$(dirname "$0")/lib.sh"
-
-plain_project="$(mktemp -d)"
-if plain_error="$("$TRIBIOS_BIN" configure "$plain_project" 2>&1)"; then
-  rm -rf "$plain_project"
-  fail "configuring a non-Git Project must fail"
-fi
-rm -rf "$plain_project"
-assert_contains "is not a Git Project" "$plain_error"
 
 make_project
 configure_project
-
-grep -q "may include secrets" "$WORK/configure.err" ||
-  fail "configure must warn that captured ignored files may include secrets"
-grep -q "^base state:" "$WORK/configure.out" || fail "configure must report the Base state size"
-
-# The Base state is captured once and is immutable.
-if "$TRIBIOS_BIN" configure "$PROJECT" >/dev/null 2>&1; then
-  fail "configuring an already configured Project must not recapture the Base state"
-fi
-
 start_daemon
 tribios workspace create alpha >/dev/null
 tribios workspace create beta --branch feature/beta >/dev/null

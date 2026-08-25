@@ -1,14 +1,22 @@
 #include "core/paths.hpp"
 
+#include <vector>
+
 namespace tribios {
 
 std::string normalize_relative(std::string_view path) {
-  std::string normalized;
+  std::vector<std::string> segments;
   std::string segment;
   auto take_segment = [&] {
-    if (!segment.empty() && segment != ".") {
-      if (!normalized.empty()) normalized.push_back('/');
-      normalized += segment;
+    if (segment == "..") {
+      // The parent of the view root is the view root, as on any filesystem, so
+      // a ".." that would climb past it is dropped instead of followed. Without
+      // this a caller that reaches the engine without kernel path resolution in
+      // front of it, such as the control socket, could name a path outside the
+      // Workspace.
+      if (!segments.empty()) segments.pop_back();
+    } else if (!segment.empty() && segment != ".") {
+      segments.push_back(segment);
     }
     segment.clear();
   };
@@ -20,6 +28,12 @@ std::string normalize_relative(std::string_view path) {
     }
   }
   take_segment();
+
+  std::string normalized;
+  for (const std::string& taken : segments) {
+    if (!normalized.empty()) normalized.push_back('/');
+    normalized += taken;
+  }
   return normalized;
 }
 
