@@ -255,11 +255,11 @@ stop_daemon
 # Damaged state fails closed before a mount is exposed, and repeated attempts
 # retain one stable diagnostic identifier for read-only inspection.
 printf 'invalid Git pointer\n' > "$PROJECT/.tribios/workspaces/interrupted/upper/.git"
-if first_failure="$($TRIBIOS_DAEMON --project "$PROJECT" --no-mount 2>&1)"; then
+if first_failure="$("$TRIBIOS_DAEMON" --project "$PROJECT" --no-mount 2>&1)"; then
   fail "the daemon exposed a Project with invalid Git metadata"
 fi
 assert_contains "recovery diagnostic R" "$first_failure"
-if second_failure="$($TRIBIOS_DAEMON --project "$PROJECT" --no-mount 2>&1)"; then
+if second_failure="$("$TRIBIOS_DAEMON" --project "$PROJECT" --no-mount 2>&1)"; then
   fail "the damaged Project started on a repeated attempt"
 fi
 first_diagnostic="$(echo "$first_failure" | grep -o 'R[0-9][0-9]*' | head -1)"
