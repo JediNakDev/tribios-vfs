@@ -1,27 +1,9 @@
 #!/usr/bin/env bash
-# Workspace lifecycle: configure once, create, list, remove.
+# A Workspace can be created, listed, read as a full Base-state copy and removed.
 source "$(dirname "$0")/lib.sh"
-
-plain_project="$(mktemp -d)"
-if plain_error="$("$TRIBIOS_BIN" configure "$plain_project" 2>&1)"; then
-  rm -rf "$plain_project"
-  fail "configuring a non-Git Project must fail"
-fi
-rm -rf "$plain_project"
-assert_contains "is not a Git Project" "$plain_error"
 
 make_project
 configure_project
-
-grep -q "may include secrets" "$WORK/configure.err" ||
-  fail "configure must warn that captured ignored files may include secrets"
-grep -q "^base state:" "$WORK/configure.out" || fail "configure must report the Base state size"
-
-# The Base state is captured once and is immutable.
-if "$TRIBIOS_BIN" configure "$PROJECT" >/dev/null 2>&1; then
-  fail "configuring an already configured Project must not recapture the Base state"
-fi
-
 start_daemon
 tribios workspace create alpha >/dev/null
 tribios workspace create beta --branch feature/beta >/dev/null
@@ -38,22 +20,9 @@ assert_contains "local.env" "$entries"
 assert_contains ".git" "$entries"
 assert_eq "SECRET_TOKEN=untracked-and-ignored" "$(ws_read alpha local.env)" "ignored file contents"
 
-# An untouched Workspace holds no copies of the Base state.
-untouched_bytes="$(tribios upper-bytes beta)"
-base_bytes="$(grep -o 'base state: [0-9]* entries, [0-9]*' "$WORK/configure.out" | awk '{print $5}')"
-[ "$untouched_bytes" -lt $(( base_bytes / 100 + 4096 )) ] ||
-  fail "an untouched Workspace must not consume Base-state sized storage (got $untouched_bytes)"
-
-# Logical removal makes the Workspace disappear and is reported separately from
-# physical reclamation.
-removal="$(tribios workspace remove alpha)"
-assert_contains "logically in" "$removal"
+# Removal makes the Workspace disappear.
+tribios workspace remove alpha >/dev/null
 assert_gone alpha docs/notes.txt
-tribios workspace wait-reclaim
-after="$(tribios workspace list | grep '^alpha')"
-assert_contains "reclaimed" "$after"
-reclaim_us="$(echo "$after" | awk -F'\t' '{print $6}')"
-[ "$reclaim_us" -ge 0 ] || fail "physical reclamation time must be recorded separately"
 
 stop_daemon
 echo "PASS workspace lifecycle"

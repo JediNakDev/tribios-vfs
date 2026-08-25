@@ -1,0 +1,53 @@
+name: Push checks
+
+# Tier 0 and tier 1 on every branch push: fast feedback, Linux only.
+# The strict mounted gate lives in pull-request.yml.
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-and-invariant-tests:
+    name: Unit and invariant tests on Linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install build and FUSE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            pkg-config \
+            sqlite3 \
+            libsqlite3-dev \
+            libfuse-dev \
+            fuse \
+            g++-13
+
+      # C++23 std::expected needs GCC 12 or newer. The image default is not
+      # relied on: the compiler is named here so a base image change is visible.
+      - name: Configure the build
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-13
+
+      - name: Build
+        run: ninja -C build
+
+      # --no-tests=error keeps a label that matches nothing from passing silently.
+      - name: Run unit tests
+        run: ctest --test-dir build -L unit --output-on-failure --no-tests=error
+
+      - name: Run invariant tests
+        run: ctest --test-dir build -L invariant --output-on-failure --no-tests=error
