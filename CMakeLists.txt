@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(tribios_vfs LANGUAGES CXX)
+project(tribios_vfs VERSION 0.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,6 +69,18 @@ target_link_libraries(tribios_daemon PRIVATE tribios_control tribios_fuse)
 
 add_executable(tribios src/cli/main.cpp)
 target_link_libraries(tribios PRIVATE tribios_control)
+target_compile_definitions(tribios PRIVATE TRIBIOS_VERSION="${PROJECT_VERSION}")
+
+include(GNUInstallDirs)
+
+set(CMAKE_INSTALL_DOCDIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/tribios-vfs")
+set(TRIBIOS_DAEMON_LIBEXEC_DIR "${CMAKE_INSTALL_LIBEXECDIR}/tribios")
+target_compile_definitions(tribios PRIVATE
+  TRIBIOS_DAEMON_LIBEXEC_DIR="${TRIBIOS_DAEMON_LIBEXEC_DIR}")
+
+install(TARGETS tribios RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS tribios_daemon RUNTIME DESTINATION ${TRIBIOS_DAEMON_LIBEXEC_DIR})
+install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 enable_testing()
 add_subdirectory(tests)

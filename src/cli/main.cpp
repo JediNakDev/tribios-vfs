@@ -47,6 +47,7 @@ usage:
   tribios workspace wait-reclaim [--project <path>]
   tribios recovery inspect [--project <path>]
   tribios fs <verb> <workspace> <args...> [--project <path>]
+  tribios version
 
 `tribios fs` drives the Workspace engine directly. On macOS the same behavior is
 reachable through the mounted Workspace path; the verbs exist so the test and
@@ -113,6 +114,25 @@ std::filesystem::path executable_directory(const char* argv0) {
   }
 #endif
   return std::filesystem::absolute(std::filesystem::path(argv0)).parent_path();
+}
+
+// The daemon sits beside the CLI in a build tree and under libexec in an
+// installed tree. Both are resolved relative to the running executable so an
+// installation stays relocatable, which Homebrew's cellar and DESTDIR staging
+// both require.
+std::filesystem::path resolve_daemon_path(const char* argv0) {
+  if (const char* from_env = std::getenv("TRIBIOS_DAEMON"); from_env != nullptr) {
+    return from_env;
+  }
+  const auto directory = executable_directory(argv0);
+  const auto beside_cli = directory / "tribios_daemon";
+  if (std::filesystem::exists(beside_cli)) return beside_cli;
+  const std::filesystem::path libexec_directory{TRIBIOS_DAEMON_LIBEXEC_DIR};
+  const auto installed = libexec_directory.is_absolute()
+                             ? libexec_directory / "tribios_daemon"
+                             : directory.parent_path() / libexec_directory / "tribios_daemon";
+  if (std::filesystem::exists(installed)) return installed;
+  return beside_cli;
 }
 
 int report_error(const std::string& message) {
@@ -212,12 +232,7 @@ int command_daemon(const Options& options, const char* argv0) {
     return 0;
   }
 
-  std::filesystem::path daemon_path;
-  if (const char* from_env = std::getenv("TRIBIOS_DAEMON"); from_env != nullptr) {
-    daemon_path = from_env;
-  } else {
-    daemon_path = executable_directory(argv0) / "tribios_daemon";
-  }
+  const auto daemon_path = resolve_daemon_path(argv0);
   std::vector<std::string> arguments{daemon_path.string(), "--project", paths.root.string()};
   if (options.no_mount) arguments.push_back("--no-mount");
   std::vector<char*> raw;
@@ -376,6 +391,10 @@ int main(int argc, char** argv) {
   if (command == "info") return command_info(options);
   if (command == "fs") return command_fs(options);
   if (command == "upper-bytes") return command_upper_bytes(options);
+  if (command == "version" || command == "--version") {
+    std::cout << "tribios " << TRIBIOS_VERSION << "\n";
+    return 0;
+  }
   if (command == "help" || command == "--help") {
     std::cout << kUsage;
     return 0;

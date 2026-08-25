@@ -22,6 +22,7 @@ set(TRIBIOS_DESIGN_TESTS
   unsupported_operations
   git_workflow
   end_to_end_build
+  packaging_install
 )
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
@@ -34,6 +35,7 @@ foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
            COMMAND ${CMAKE_COMMAND} -E env
                    TRIBIOS_BIN=$<TARGET_FILE:tribios>
                    TRIBIOS_DAEMON=$<TARGET_FILE:tribios_daemon>
+                   TRIBIOS_BUILD_DIR=${CMAKE_BINARY_DIR}
                    bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/${script}.sh)
   set_tests_properties(${script} PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS ${tier})
   if(script MATCHES "^(crash_recovery|recovery_faults|recovery_sequences)$")

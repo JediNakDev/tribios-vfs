@@ -49,7 +49,7 @@ CI runs independent invariant scripts with `ctest --parallel 4` so deterministic
 
 Tier 2 is designed-decision end-to-end tests, under `tests/e2e/`, labeled `design`.
 They run on every pull request, with a 10 minute budget.
-They are `configure_contract`, `unsupported_operations`, `git_workflow` and `end_to_end_build`.
+They are `configure_contract`, `unsupported_operations`, `git_workflow`, `end_to_end_build` and `packaging_install`.
 
 Tier 3 is the benchmark, under `bench/`.
 It runs nightly against a small fixture and on release tags against the full 100,000 file, 2 GiB fixture that `docs/prototype/experiment.md` specifies.

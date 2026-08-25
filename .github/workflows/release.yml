@@ -1,0 +1,53 @@
+name: Release
+
+# Publishes the immutable source archive every downstream packaging recipe
+# consumes: the Homebrew formula, the PKGBUILD, the Debian source package and
+# the Copr spec all fetch this archive and verify it against the checksum file
+# published beside it. docs/release-and-install-contract.md records the contract.
+#
+# The archive is produced with `git archive` from the tag, so it is a pure
+# function of the tagged tree and is reproducible by anyone with the tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-archive:
+    name: Publish the release archive and checksums
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Check the tag against the project version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_version="$(sed -n 's/^project(tribios_vfs VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          if [ "$tag_version" != "$project_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match CMakeLists.txt version $project_version" >&2
+            exit 1
+          fi
+
+      - name: Build the archive and record its checksum
+        run: |
+          name="tribios-vfs-${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="$name/" -o "$name.tar.gz" "$GITHUB_REF_NAME"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          cat "$name.tar.gz.sha256"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="tribios-vfs-${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --prerelease \
+            "$name.tar.gz" "$name.tar.gz.sha256"
