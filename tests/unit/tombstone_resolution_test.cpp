@@ -230,6 +230,17 @@ TEST_CASE("remove_tombstones_under treats a percent sign in a path as a literal 
         std::vector<std::string>{"ab/c", "unrelated"});
 }
 
+TEST_CASE("remove_tombstones_under treats the LIKE escape character literally") {
+  WorkspaceFixture fixture;
+  for (const char* path : {R"(a\b/c)", "ab/c", "unrelated"}) {
+    REQUIRE(fixture.store->add_tombstone("feature-x", path).has_value());
+  }
+  REQUIRE(fixture.store->remove_tombstones_under("feature-x", R"(a\b)").has_value());
+
+  CHECK(sorted_tombstones(*fixture.store, "feature-x") ==
+        std::vector<std::string>{"ab/c", "unrelated"});
+}
+
 TEST_CASE("clear_tombstones empties one Workspace and leaves the others alone") {
   WorkspaceFixture fixture;
   REQUIRE(fixture.store->add_tombstone("feature-x", "docs").has_value());
