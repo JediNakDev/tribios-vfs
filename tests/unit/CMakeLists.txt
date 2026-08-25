@@ -23,3 +23,9 @@ target_link_libraries(tribios_unit_tests PRIVATE tribios_control tribios_core
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(tribios_unit_tests PROPERTIES LABELS "unit")
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME benchmark_harness
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/benchmark_harness_test.py)
+set_tests_properties(benchmark_harness PROPERTIES LABELS "unit")

@@ -184,9 +184,19 @@ Base-state capture time is reported separately from Workspace creation time, and
 physical reclamation and the storage a removed Workspace still holds are
 reported separately from logical removal.
 
+The final run requires at least five lifecycle samples and three clean build and
+test samples. It refuses to pass a fixture smaller than 100,000 regular files or
+roughly 2 GiB. Storage gates use allocated backing-store bytes, including SQLite
+and its WAL sidecars. The harness checks that scratch storage can hold eight
+full-copy baselines plus a 1 GiB safety margin before timing begins.
+
 The run drives the correctness suite itself and evaluates every gate issue #1
 decides on. A gate with no measurement behind it fails, so a run whose
 mounted-path tests or cases were skipped reports FAIL rather than PASS.
+
+For a quick end-to-end harness check, generate a smaller fixture and pass
+`--smoke --repetitions 1 --build-repetitions 1`. Smoke mode runs every case but
+marks its report as ineligible for the final issue verdict.
 
 ## Deliberate limits of this prototype
 
