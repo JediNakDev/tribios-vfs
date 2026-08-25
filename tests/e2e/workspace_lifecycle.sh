@@ -46,6 +46,36 @@ base_bytes="$(grep -o 'base state: [0-9]* entries, [0-9]*' "$WORK/configure.out"
 
 # Logical removal makes the Workspace disappear and is reported separately from
 # physical reclamation.
+# The trigger only injects the storage failure. Assertions stay at the CLI and
+# filesystem boundary.
+python3 - "$PROJECT/.tribios/meta.db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as database:
+    database.execute("""
+        CREATE TRIGGER reject_workspace_save
+        BEFORE INSERT ON workspace
+        BEGIN
+          SELECT RAISE(FAIL, 'test metadata write failure');
+        END
+    """)
+PY
+if removal_error="$(tribios workspace remove alpha 2>&1)"; then
+  fail "logical removal must fail when its metadata cannot be committed"
+fi
+assert_contains "test metadata write failure" "$removal_error"
+assert_eq "shared base content" "$(ws_read alpha docs/notes.txt)" \
+  "a failed logical removal must leave the Workspace accessible"
+assert_contains $'alpha\tactive' "$(tribios workspace list)"
+python3 - "$PROJECT/.tribios/meta.db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as database:
+    database.execute("DROP TRIGGER reject_workspace_save")
+PY
+
 removal="$(tribios workspace remove alpha)"
 assert_contains "logically in" "$removal"
 assert_gone alpha docs/notes.txt

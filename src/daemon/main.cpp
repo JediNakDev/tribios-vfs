@@ -1,7 +1,4 @@
-#include <sys/stat.h>
-#ifdef __APPLE__
 #include <sys/mount.h>
-#endif
 
 #include <chrono>
 #include <csignal>
@@ -23,25 +20,12 @@ std::filesystem::path glb_mount_point;
 bool wait_for_mount(const std::filesystem::path& mount_point,
                     std::chrono::seconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
-#ifdef __APPLE__
   struct statfs mount_info {};
-#else
-  struct stat mount_stat {};
-  struct stat parent_stat {};
-#endif
   while (std::chrono::steady_clock::now() < deadline) {
-#ifdef __APPLE__
     if (::statfs(mount_point.c_str(), &mount_info) == 0 &&
         std::string_view(mount_info.f_fstypename) == "macfuse") {
       return true;
     }
-#else
-    if (::stat(mount_point.c_str(), &mount_stat) == 0 &&
-        ::stat(mount_point.parent_path().c_str(), &parent_stat) == 0 &&
-        mount_stat.st_dev != parent_stat.st_dev) {
-      return true;
-    }
-#endif
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return false;

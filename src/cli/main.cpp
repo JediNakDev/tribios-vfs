@@ -1,9 +1,7 @@
 #include <fcntl.h>
+#include <mach-o/dyld.h>
 #include <spawn.h>
-#include <sys/stat.h>
-#ifdef __APPLE__
 #include <sys/mount.h>
-#endif
 #include <unistd.h>
 
 #include <chrono>
@@ -19,10 +17,6 @@
 #include "core/paths.hpp"
 #include "core/project_manager.hpp"
 #include "daemon/control_client.hpp"
-
-#ifdef __APPLE__
-#include <mach-o/dyld.h>
-#endif
 
 extern char** environ;
 
@@ -99,18 +93,10 @@ Outcome<std::filesystem::path> resolve_configured_project_root(const Options& op
 
 std::filesystem::path executable_directory(const char* argv0) {
   char buffer[4096];
-#ifdef __APPLE__
   std::uint32_t size = sizeof(buffer);
   if (_NSGetExecutablePath(buffer, &size) == 0) {
     return std::filesystem::weakly_canonical(std::filesystem::path(buffer)).parent_path();
   }
-#else
-  const ssize_t n = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-  if (n > 0) {
-    buffer[n] = '\0';
-    return std::filesystem::path(buffer).parent_path();
-  }
-#endif
   return std::filesystem::absolute(std::filesystem::path(argv0)).parent_path();
 }
 
@@ -141,17 +127,9 @@ OutcomeVoid wait_for_socket_to_close(const std::filesystem::path& socket_path,
 }
 
 bool mount_is_active(const std::filesystem::path& mount_point) {
-#ifdef __APPLE__
   struct statfs mount_info {};
   return ::statfs(mount_point.c_str(), &mount_info) == 0 &&
          std::string_view(mount_info.f_fstypename) == "macfuse";
-#else
-  struct stat mount_stat {};
-  struct stat parent_stat {};
-  return ::stat(mount_point.c_str(), &mount_stat) == 0 &&
-         ::stat(mount_point.parent_path().c_str(), &parent_stat) == 0 &&
-         mount_stat.st_dev != parent_stat.st_dev;
-#endif
 }
 
 OutcomeVoid wait_for_mount_to_close(const std::filesystem::path& mount_point,
