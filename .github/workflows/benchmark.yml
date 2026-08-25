@@ -92,9 +92,16 @@ jobs:
       # exiting non-zero when one fails. Propagating its exit code is the gate.
       - name: Run the benchmark
         run: |
-          python3 bench/benchmark.py --cli build/tribios --project "$FIXTURE_PATH" \
-            --scratch "$SCRATCH_PATH" --build-directory build \
-            --output bench/results/latest.json
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python3 bench/benchmark.py --cli build/tribios --project "$FIXTURE_PATH" \
+              --scratch "$SCRATCH_PATH" --build-directory build \
+              --repetitions 1 --build-repetitions 1 --smoke \
+              --output bench/results/latest.json
+          else
+            python3 bench/benchmark.py --cli build/tribios --project "$FIXTURE_PATH" \
+              --scratch "$SCRATCH_PATH" --build-directory build \
+              --output bench/results/latest.json
+          fi
 
       - name: Stop the daemon
         if: always()

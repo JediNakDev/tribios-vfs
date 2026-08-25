@@ -18,6 +18,7 @@ class ControlServer {
 
   OutcomeVoid serve();  // runs until a shutdown request arrives
   void stop();
+  void remove_socket();
 
   // Reported by `info` so callers know whether a mounted path exists.
   void set_mount_active(bool active) { mount_active_.store(active); }

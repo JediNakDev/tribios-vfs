@@ -82,7 +82,8 @@ std::optional<ControlReply> dispatch_filesystem_query(WorkspaceEngine& engine,
     auto attributes = engine.getattr(path);
     if (!attributes) return errno_error_reply(attributes.error());
     return ok_reply({format_file_mode(attributes->mode), std::to_string(attributes->size),
-                     attributes->from_upper ? "upper" : "base"});
+                     attributes->from_upper ? "upper" : "base",
+                     std::to_string(attributes->mtime)});
   }
   if (verb == "fs.ls") {
     auto entries = engine.readdir(path);
@@ -114,7 +115,7 @@ ControlReply dispatch_filesystem_mutation(WorkspaceEngine& engine, const std::st
     auto written = engine.write_file(path, data, offset);
     if (!written) return errno_error_reply(written.error());
     if (offset == 0) {
-      auto trimmed = engine.truncate(path, data.size());
+      auto trimmed = engine.truncate(path, *written);
       if (!trimmed) return errno_error_reply(trimmed.error());
     }
     return ok_reply({std::to_string(*written)});
@@ -138,6 +139,19 @@ ControlReply dispatch_filesystem_mutation(WorkspaceEngine& engine, const std::st
     const std::uint64_t size =
         std::strtoull(request_argument(request, 3).c_str(), nullptr, 10);
     return filesystem_status_reply(engine.truncate(path, size));
+  }
+  if (verb == "fs.utimens") {
+    const std::int64_t atime =
+        std::strtoll(request_argument(request, 3).c_str(), nullptr, 10);
+    const std::int64_t mtime =
+        std::strtoll(request_argument(request, 4).c_str(), nullptr, 10);
+    return filesystem_status_reply(engine.utimens(path, atime, mtime));
+  }
+  if (verb == "fs.fsync") {
+    return filesystem_status_reply(engine.fsync_path(path, false, false));
+  }
+  if (verb == "fs.fsyncdir") {
+    return filesystem_status_reply(engine.fsync_path(path, false, true));
   }
   if (verb == "fs.hardlink" || verb == "fs.setxattr" || verb == "fs.getxattr" ||
       verb == "fs.lock" || verb == "fs.mknod") {
@@ -222,7 +236,7 @@ OutcomeVoid ControlServer::serve() {
     ::close(client);
   }
   ::close(listen_fd_);
-  ::unlink(socket_path_.c_str());
+  listen_fd_ = -1;
   return {};
 }
 
@@ -230,5 +244,7 @@ void ControlServer::stop() {
   running_.store(false);
   if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
 }
+
+void ControlServer::remove_socket() { ::unlink(socket_path_.c_str()); }
 
 }  // namespace tribios

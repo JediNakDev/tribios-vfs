@@ -10,6 +10,10 @@ set(TRIBIOS_INVARIANT_TESTS
   isolation
   deletion_and_tombstones
   restart_persistence
+  crash_recovery
+  recovery_faults
+  recovery_sequences
+  mounted_crash_recovery
 )
 
 # Tier 2: designed decisions traceable to an ADR or a documented deliberate limit.
@@ -32,6 +36,9 @@ foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
                    TRIBIOS_DAEMON=$<TARGET_FILE:tribios_daemon>
                    bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/${script}.sh)
   set_tests_properties(${script} PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS ${tier})
+  if(script MATCHES "^(crash_recovery|recovery_faults|recovery_sequences)$")
+    set_property(TEST ${script} APPEND PROPERTY ENVIRONMENT TRIBIOS_TEST_NO_MOUNT=1)
+  endif()
 endforeach()
 
 add_subdirectory(unit)

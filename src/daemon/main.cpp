@@ -47,6 +47,20 @@ bool wait_for_mount(const std::filesystem::path& mount_point,
   return false;
 }
 
+bool mount_is_active(const std::filesystem::path& mount_point) {
+#ifdef __APPLE__
+  struct statfs mount_info {};
+  return ::statfs(mount_point.c_str(), &mount_info) == 0 &&
+         std::string_view(mount_info.f_fstypename) == "macfuse";
+#else
+  struct stat mount_stat {};
+  struct stat parent_stat {};
+  return ::stat(mount_point.c_str(), &mount_stat) == 0 &&
+         ::stat(mount_point.parent_path().c_str(), &parent_stat) == 0 &&
+         mount_stat.st_dev != parent_stat.st_dev;
+#endif
+}
+
 void stop_daemon_on_signal(int) {
   if (glb_control_server != nullptr) glb_control_server->stop();
   if (!glb_mount_point.empty()) tribios::request_unmount(glb_mount_point);
@@ -74,6 +88,20 @@ int main(int argc, char** argv) {
   if (project.empty()) {
     std::cerr << "tribios_daemon: --project is required\n";
     return 2;
+  }
+
+  const auto startup_paths = tribios::ProjectPaths::from_project_root(project);
+  if (mount && mount_is_active(startup_paths.mount_point)) {
+    tribios::request_unmount(startup_paths.mount_point);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (mount_is_active(startup_paths.mount_point) &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (mount_is_active(startup_paths.mount_point)) {
+      std::cerr << "tribios_daemon: cannot remove the stale Project mount before recovery\n";
+      return 1;
+    }
   }
 
   auto manager = tribios::ProjectManager::open_configured_project(project);
@@ -111,6 +139,9 @@ int main(int argc, char** argv) {
   if (mount_thread.joinable()) mount_thread.join();
   // Workspace data and metadata are preserved across a clean shutdown.
   (*manager)->wait_for_reclamation();
+  // Socket disappearance is the CLI's clean-shutdown completion signal.
+  // Keep it present until reclamation releases every SQLite transaction.
+  server.remove_socket();
   if (!served) {
     std::cerr << "tribios_daemon: " << served.error() << "\n";
     return 1;

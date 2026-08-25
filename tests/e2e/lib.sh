@@ -5,7 +5,14 @@
 # it is `tribios fs`, which reaches the same engine the callbacks call. The
 # ws_* helpers below pick whichever exists, so one test body covers both.
 
-set -euo pipefail
+set -Eeuo pipefail
+
+report_unexpected_command_failure() {
+  local status="$?"
+  echo "FAIL: ${BASH_SOURCE[1]}:${BASH_LINENO[0]}: [$BASH_COMMAND] exited $status" >&2
+  exit "$status"
+}
+trap report_unexpected_command_failure ERR
 
 TRIBIOS_BIN="${TRIBIOS_BIN:?TRIBIOS_BIN must point at the tribios CLI}"
 export TRIBIOS_DAEMON="${TRIBIOS_DAEMON:?TRIBIOS_DAEMON must point at the daemon}"
@@ -100,7 +107,17 @@ configure_project() {
 }
 
 start_daemon() {
-  tribios daemon start >/dev/null
+  local start_output
+  local start_arguments=(daemon start)
+  if [ "${TRIBIOS_TEST_NO_MOUNT:-0}" = 1 ]; then start_arguments+=(--no-mount); fi
+  if ! start_output="$(tribios "${start_arguments[@]}" 2>&1)"; then
+    echo "$start_output" >&2
+    if [ -f "$PROJECT/.tribios/daemon.log" ]; then
+      echo "daemon log:" >&2
+      sed -n '1,240p' "$PROJECT/.tribios/daemon.log" >&2
+    fi
+    fail "the daemon did not start"
+  fi
   local info
   info="$(tribios info)"
   case "$info" in

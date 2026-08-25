@@ -34,7 +34,7 @@ using tribios::Outcome;
 using tribios::OutcomeVoid;
 
 constexpr const char* kUsage =
-    R"(tribios - THROWAWAY PROTOTYPE (see docs/prototype/README.md)
+    R"(tribios - persistent isolated development Workspaces
 
 usage:
   tribios configure <project> [--mount <path>] [--force]
@@ -45,6 +45,7 @@ usage:
   tribios workspace list [--project <path>]
   tribios workspace remove <name> [--project <path>]
   tribios workspace wait-reclaim [--project <path>]
+  tribios recovery inspect [--project <path>]
   tribios fs <verb> <workspace> <args...> [--project <path>]
 
 `tribios fs` drives the Workspace engine directly. On macOS the same behavior is
@@ -330,6 +331,35 @@ int command_upper_bytes(const Options& options) {
   return 0;
 }
 
+int command_recovery(const Options& options) {
+  if (options.positional.size() < 2 || options.positional[1] != "inspect") {
+    return report_error("recovery needs inspect");
+  }
+  auto project = resolve_configured_project_root(options);
+  if (!project) return report_error(project.error());
+  const auto paths = tribios::ProjectPaths::from_project_root(*project);
+  auto store = tribios::MetadataStore::open_database_read_only(paths.database);
+  if (!store) return report_error(store.error());
+  auto operations = (*store)->load_recovery_operations();
+  if (!operations) return report_error(operations.error());
+  auto diagnostics = (*store)->load_recovery_diagnostics();
+  if (!diagnostics) return report_error(diagnostics.error());
+
+  std::cout << "metadata format: 1\n";
+  std::cout << "pending operations: " << operations->size() << "\n";
+  for (const auto& operation : *operations) {
+    std::cout << "operation " << operation.id << " Workspace " << operation.workspace << " "
+              << operation.kind << " " << operation.path;
+    if (!operation.target.empty()) std::cout << " -> " << operation.target;
+    std::cout << "\n";
+  }
+  std::cout << "recovery diagnostics: " << diagnostics->size() << "\n";
+  for (const auto& diagnostic : *diagnostics) {
+    std::cout << "R" << diagnostic.id << " " << diagnostic.message << "\n";
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -342,6 +372,7 @@ int main(int argc, char** argv) {
   if (command == "configure") return command_configure(options);
   if (command == "daemon") return command_daemon(options, argv[0]);
   if (command == "workspace") return command_workspace(options);
+  if (command == "recovery") return command_recovery(options);
   if (command == "info") return command_info(options);
   if (command == "fs") return command_fs(options);
   if (command == "upper-bytes") return command_upper_bytes(options);

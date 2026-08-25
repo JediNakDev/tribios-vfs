@@ -930,7 +930,8 @@ tribios remove ws   ->  [1] logical: hide the workspace, commit removed state, r
                         [2] physical: reclaim the upper tree asynchronously, reported separately
 ```
 
-Crash consistency during an interrupted mutating operation is out of scope for this prototype and is specified in issue #2.
+The prototype did not claim crash consistency during an interrupted mutation.
+The production recovery decision and contract are recorded in `docs/adr/0005-journal-crash-consistent-workspace-mutations.md`.
 
 ### Pass or fail gates
 

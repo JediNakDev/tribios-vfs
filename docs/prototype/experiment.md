@@ -41,6 +41,14 @@ The prototype passes only if every gate below passes.
 Base-state capture time is reported separately and is not part of the creation
 gate. Physical reclamation time and transient storage are measured and reported
 but are not included in logical removal latency.
+The harness requires at least five lifecycle samples and three clean build and
+test samples. Storage measurements use allocated backing-store bytes and include
+allocation growth in SQLite, its write-ahead log and shared-memory sidecar.
+Before timing, the harness requires enough scratch space for eight full-copy
+baselines plus a 1 GiB safety margin.
+
+Smoke runs may use smaller fixtures and fewer repetitions to verify the harness.
+Their reports are explicitly ineligible for the final issue verdict.
 
 ## Environment
 

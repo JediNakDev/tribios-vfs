@@ -24,6 +24,10 @@ ws_mkdir fs newdir
 ws_write fs newdir/inner.txt "inner"
 assert_contains "inner.txt" "$(ws_ls fs newdir)"
 
+# File and directory durability are available through the direct engine seam.
+tribios fs fsync fs newdir/inner.txt >/dev/null
+tribios fs fsyncdir fs newdir >/dev/null
+
 # Rename stays private to the Workspace.
 ws_mv fs docs/list.txt docs/renamed.txt
 ws_exists fs docs/list.txt && fail "the rename source must be gone"

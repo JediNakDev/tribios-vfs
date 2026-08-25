@@ -10,7 +10,8 @@ Engine behavior stays at the `tribios fs` seam.
 Only pure logic goes in tier 0.
 
 Tier 1 is forced-invariant end-to-end tests.
-They run pre-commit with a 60s budget, and they are `workspace_lifecycle`, `filesystem_semantics`, `isolation`, `deletion_and_tombstones` and `restart_persistence`.
+They run pre-commit with a 60s parallel wall-clock budget, and they include lifecycle, filesystem, isolation, restart, crash-recovery, injected-I/O, seeded-sequence, and mounted-recovery tests.
+CI uses four CTest workers because each script owns an independent temporary Project.
 `restart_persistence` is a forced invariant because Workspace lifecycle in `CONTEXT.md` guarantees that a Workspace remains available across command exits, Tribios restarts and machine reboots.
 
 Tier 2 is designed-decision end-to-end tests.

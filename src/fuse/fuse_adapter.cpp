@@ -21,6 +21,11 @@ namespace {
 
 ProjectManager* glb_project_manager = nullptr;
 
+// The view root has no backing directory of its own, so it gets a fixed inode.
+// Workspace inodes come from the engines and are mixed across the 64-bit range,
+// which keeps them clear of this one.
+constexpr ino_t kProjectViewRootInode = 1;
+
 // "/" is the view root, "/<workspace>" a Workspace root, deeper paths are
 // Workspace-relative.
 struct ViewPath {
@@ -53,6 +58,7 @@ std::shared_ptr<WorkspaceEngine> find_workspace_engine_for_view_path(const ViewP
 
 void populate_stat_from_attributes(const Attr& attr, struct stat* out) {
   memset(out, 0, sizeof(*out));
+  out->st_ino = static_cast<ino_t>(attr.ino);
   out->st_mode = attr.mode;
   out->st_size = static_cast<off_t>(attr.size);
   out->st_nlink = static_cast<nlink_t>(attr.nlink);
@@ -67,6 +73,7 @@ int tri_getattr(const char* path, struct stat* out) {
   const ViewPath view = parse_project_view_path(path);
   if (view.is_root) {
     memset(out, 0, sizeof(*out));
+    out->st_ino = kProjectViewRootInode;
     out->st_mode = S_IFDIR | 0755;
     out->st_nlink = 2;
     out->st_uid = getuid();
@@ -81,15 +88,46 @@ int tri_getattr(const char* path, struct stat* out) {
   return 0;
 }
 
+// Directory entries carry their inode and file type so that readers get a
+// populated d_type. Without it every entry reads as DT_UNKNOWN and tools such
+// as find, ls and git follow up with a separate lookup per entry.
+int fill_directory_entry(void* buffer, fuse_fill_dir_t filler, const std::string& name,
+                         std::uint64_t ino, mode_t mode) {
+  struct stat entry_type {};
+  entry_type.st_ino = static_cast<ino_t>(ino);
+  entry_type.st_mode = mode;
+  return filler(buffer, name.c_str(), &entry_type, 0);
+}
+
+// A Workspace root resolves through its own engine; anything deeper resolves
+// relative to it. Returns the view root's inode for paths above a Workspace.
+std::uint64_t resolve_view_path_inode(const ViewPath& view) {
+  if (view.is_root) return kProjectViewRootInode;
+  auto engine = find_workspace_engine_for_view_path(view);
+  if (engine == nullptr) return kProjectViewRootInode;
+  auto attr = engine->getattr(view.relative);
+  return attr ? attr->ino : kProjectViewRootInode;
+}
+
+std::uint64_t parent_view_path_inode(const ViewPath& view) {
+  if (view.is_root || view.relative.empty()) return kProjectViewRootInode;
+  ViewPath parent = view;
+  parent.relative = parent_of(view.relative);
+  return resolve_view_path_inode(parent);
+}
+
 int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t,
                 struct fuse_file_info*) {
   const ViewPath view = parse_project_view_path(path);
-  filler(buffer, ".", nullptr, 0);
-  filler(buffer, "..", nullptr, 0);
+  fill_directory_entry(buffer, filler, ".", resolve_view_path_inode(view), S_IFDIR);
+  fill_directory_entry(buffer, filler, "..", parent_view_path_inode(view), S_IFDIR);
   if (view.is_root) {
     // The immediate children of the Project view are its visible Workspaces.
     for (const auto& name : glb_project_manager->active_workspace_names()) {
-      filler(buffer, name.c_str(), nullptr, 0);
+      ViewPath workspace_root;
+      workspace_root.workspace = name;
+      fill_directory_entry(buffer, filler, name, resolve_view_path_inode(workspace_root),
+                           S_IFDIR);
     }
     return 0;
   }
@@ -97,7 +135,9 @@ int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t,
   if (engine == nullptr) return -ENOENT;
   auto entries = engine->readdir(view.relative);
   if (!entries) return -entries.error();
-  for (const auto& entry : *entries) filler(buffer, entry.name.c_str(), nullptr, 0);
+  for (const auto& entry : *entries) {
+    fill_directory_entry(buffer, filler, entry.name, entry.ino, entry.mode);
+  }
   return 0;
 }
 
@@ -257,9 +297,28 @@ int tri_listxattr(const char*, char*, size_t) { return -ENOTSUP; }
 int tri_removexattr(const char*, const char*) { return -ENOTSUP; }
 int tri_lock(const char*, struct fuse_file_info*, int, struct flock*) { return -ENOTSUP; }
 
-int tri_fsync(const char*, int, struct fuse_file_info* info) {
-  if (info != nullptr && info->fh != 0) ::fsync(static_cast<int>(info->fh));
-  return 0;
+int tri_fsync(const char* path, int data_only, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
+  if (engine == nullptr) return -ENOENT;
+  auto status = engine->fsync_handle(static_cast<int>(info->fh), data_only != 0);
+  return status ? 0 : -status.error();
+}
+
+int tri_flush(const char* path, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
+  if (engine == nullptr) return -ENOENT;
+  auto status = engine->fsync_handle(static_cast<int>(info->fh), false);
+  return status ? 0 : -status.error();
+}
+
+int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
+  const ViewPath view = parse_project_view_path(path);
+  auto engine = find_workspace_engine_for_view_path(view);
+  if (engine == nullptr) return -ENOENT;
+  auto status = engine->fsync_path(view.relative, data_only != 0, true);
+  return status ? 0 : -status.error();
 }
 
 fuse_operations create_fuse_operations() {
@@ -288,7 +347,9 @@ fuse_operations create_fuse_operations() {
   ops.listxattr = tri_listxattr;
   ops.removexattr = tri_removexattr;
   ops.lock = tri_lock;
+  ops.flush = tri_flush;
   ops.fsync = tri_fsync;
+  ops.fsyncdir = tri_fsyncdir;
   return ops;
 }
 
@@ -305,8 +366,12 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
   // Multi-threaded on purpose: eight concurrent Workspaces must not queue
   // behind one another. default_permissions has the kernel enforce the modes
   // the engine reports, so permission changes behave like the host filesystem.
-  std::vector<std::string> arguments{"tribios", mount_point.string(), "-f", "-o",
-                                     "default_permissions"};
+  // use_ino keeps the engine's own inode numbers instead of letting the FUSE
+  // library invent one per lookup, which is what lets Git's index stay valid
+  // once the kernel has evicted and re-looked-up a Workspace file.
+  std::vector<std::string> arguments{"tribios",  mount_point.string(), "-f",
+                                     "-o",       "default_permissions", "-o",
+                                     "use_ino"};
 #ifdef __APPLE__
   arguments.insert(arguments.end(), {"-o", "volname=Tribios", "-o", "noappledouble"});
 #endif
