@@ -35,6 +35,8 @@ assert_eq "%{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz" \
 assert_contains "-DTRIBIOS_BUILD_TESTS=OFF" "$(cat "$SPEC")"
 assert_contains "-DTRIBIOS_ENABLE_FUSE=ON" "$(cat "$SPEC")"
 assert_contains "TRIBIOS_HAVE_FUSE" "$(cat "$SPEC")"
+assert_contains "pkgconfig(fuse3)" "$(cat "$SPEC")"
+assert_contains "Requires:       fuse3" "$(cat "$SPEC")"
 
 # --- %files matches what cmake --install actually stages --------------------
 

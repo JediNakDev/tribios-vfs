@@ -23,7 +23,7 @@ There is no system service unit, no `/etc` file, and no post-install configurati
 The daemon is per-project and the user starts it with `tribios daemon start`.
 Nothing in the package reads or writes `.tribios`, so an upgrade or an erase cannot touch project data.
 
-Runtime dependencies are `fuse`, because the daemon mounts through the FUSE 2 API and unmounts by running `fusermount`, and `git-core`, because a Workspace is a Git worktree driven by the `git` command line.
+Runtime dependencies are `fuse3`, because the daemon mounts through libfuse3 and unmounts by running `fusermount3`, and `git-core`, because a Workspace is a Git worktree driven by the `git` command line.
 
 ## Chroots
 

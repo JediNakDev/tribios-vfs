@@ -21,7 +21,7 @@ BuildRequires:  cmake >= 3.24
 BuildRequires:  ninja-build
 BuildRequires:  pkgconfig
 BuildRequires:  pkgconfig(sqlite3)
-BuildRequires:  pkgconfig(fuse)
+BuildRequires:  pkgconfig(fuse3)
 # std::expected needs libstdc++ 12 or newer. RHEL 9's system GCC is 11, so the
 # EPEL 9 build uses a toolset compiler. Fedora and EPEL 10 are new enough.
 %if 0%{?rhel} == 9
@@ -30,9 +30,9 @@ BuildRequires:  gcc-toolset-14-gcc-c++
 BuildRequires:  gcc-c++ >= 12
 %endif
 
-# The daemon mounts through the FUSE 2 API and unmounts by running fusermount,
+# The daemon mounts through libfuse3 and unmounts by running fusermount3,
 # and Workspaces are Git worktrees driven by the git command line.
-Requires:       fuse
+Requires:       fuse3
 Requires:       git-core
 
 %description
@@ -56,7 +56,7 @@ start`. This package installs no system service and configures no project.
 %cmake -GNinja -DTRIBIOS_BUILD_TESTS=OFF -DTRIBIOS_ENABLE_FUSE=ON
 %cmake_build
 
-# Configure only warns when no FUSE 2 library is found and falls back to a
+# Configure only warns when libfuse3 is not found and falls back to a
 # stub with no mount support. A package that silently lost mounting would still
 # build and still pass a version check, so fail the build here instead.
 grep -q TRIBIOS_HAVE_FUSE %{_vpath_builddir}/compile_commands.json

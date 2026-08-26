@@ -49,9 +49,10 @@ usage:
   tribios fs <verb> <workspace> <args...> [--project <path>]
   tribios version
 
-`tribios fs` drives the Workspace engine directly. On macOS the same behavior is
-reachable through the mounted Workspace path; the verbs exist so the test and
-benchmark harness can exercise identical semantics without a FUSE backend.
+`tribios fs` drives the Workspace engine directly. On macOS and Linux the same
+behavior is reachable through the mounted Workspace path; the verbs exist so
+the test and benchmark harness can exercise identical semantics without a FUSE
+backend.
 )";
 
 struct Options {

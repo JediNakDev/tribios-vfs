@@ -1,7 +1,7 @@
 // The only operating-system specific file: FUSE callbacks in, Workspace engine
-// calls out. No filesystem policy lives here. It speaks the FUSE 2.x API, which
-// macFUSE implements on macOS and libfuse on Linux.
-#define FUSE_USE_VERSION 26
+// calls out. No filesystem policy lives here. macOS supplies API 26 through
+// macFUSE, while Linux supplies API 31 through libfuse3.
+#define FUSE_USE_VERSION TRIBIOS_FUSE_API_VERSION
 
 #include "fuse/fuse_adapter.hpp"
 
@@ -69,7 +69,11 @@ void populate_stat_from_attributes(const Attr& attr, struct stat* out) {
   out->st_ctime = static_cast<time_t>(attr.ctime);
 }
 
-int tri_getattr(const char* path, struct stat* out) {
+int tri_getattr(const char* path, struct stat* out
+#if TRIBIOS_FUSE_API_VERSION >= 30
+                , struct fuse_file_info*
+#endif
+) {
   const ViewPath view = parse_project_view_path(path);
   if (view.is_root) {
     memset(out, 0, sizeof(*out));
@@ -96,7 +100,11 @@ int fill_directory_entry(void* buffer, fuse_fill_dir_t filler, const std::string
   struct stat entry_type {};
   entry_type.st_ino = static_cast<ino_t>(ino);
   entry_type.st_mode = mode;
-  return filler(buffer, name.c_str(), &entry_type, 0);
+  return filler(buffer, name.c_str(), &entry_type, 0
+#if TRIBIOS_FUSE_API_VERSION >= 30
+                , static_cast<fuse_fill_dir_flags>(0)
+#endif
+  );
 }
 
 // A Workspace root resolves through its own engine; anything deeper resolves
@@ -117,7 +125,11 @@ std::uint64_t parent_view_path_inode(const ViewPath& view) {
 }
 
 int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t,
-                struct fuse_file_info*) {
+                struct fuse_file_info*
+#if TRIBIOS_FUSE_API_VERSION >= 30
+                , fuse_readdir_flags
+#endif
+) {
   const ViewPath view = parse_project_view_path(path);
   fill_directory_entry(buffer, filler, ".", resolve_view_path_inode(view), S_IFDIR);
   fill_directory_entry(buffer, filler, "..", parent_view_path_inode(view), S_IFDIR);
@@ -224,7 +236,14 @@ int tri_rmdir(const char* path) {
   return status ? 0 : -status.error();
 }
 
-int tri_rename(const char* from, const char* to) {
+int tri_rename(const char* from, const char* to
+#if TRIBIOS_FUSE_API_VERSION >= 30
+               , unsigned int flags
+#endif
+) {
+#if TRIBIOS_FUSE_API_VERSION >= 30
+  if (flags != 0) return -ENOTSUP;
+#endif
   const ViewPath from_view = parse_project_view_path(from);
   const ViewPath to_view = parse_project_view_path(to);
   auto engine = find_workspace_engine_for_view_path(from_view);
@@ -243,7 +262,11 @@ int tri_symlink(const char* target, const char* link_path) {
   return status ? 0 : -status.error();
 }
 
-int tri_chmod(const char* path, mode_t mode) {
+int tri_chmod(const char* path, mode_t mode
+#if TRIBIOS_FUSE_API_VERSION >= 30
+              , struct fuse_file_info*
+#endif
+) {
   const ViewPath view = parse_project_view_path(path);
   auto engine = find_workspace_engine_for_view_path(view);
   if (engine == nullptr) return -ENOENT;
@@ -251,13 +274,21 @@ int tri_chmod(const char* path, mode_t mode) {
   return status ? 0 : -status.error();
 }
 
-int tri_chown(const char*, uid_t uid, gid_t gid) {
+int tri_chown(const char*, uid_t uid, gid_t gid
+#if TRIBIOS_FUSE_API_VERSION >= 30
+              , struct fuse_file_info*
+#endif
+) {
   // The Project is trusted, same-user infrastructure in this prototype.
   if (uid == getuid() && gid == getgid()) return 0;
   return -ENOTSUP;
 }
 
-int tri_truncate(const char* path, off_t size) {
+int tri_truncate(const char* path, off_t size
+#if TRIBIOS_FUSE_API_VERSION >= 30
+                 , struct fuse_file_info*
+#endif
+) {
   const ViewPath view = parse_project_view_path(path);
   auto engine = find_workspace_engine_for_view_path(view);
   if (engine == nullptr) return -ENOENT;
@@ -265,7 +296,11 @@ int tri_truncate(const char* path, off_t size) {
   return status ? 0 : -status.error();
 }
 
-int tri_utimens(const char* path, const struct timespec tv[2]) {
+int tri_utimens(const char* path, const struct timespec tv[2]
+#if TRIBIOS_FUSE_API_VERSION >= 30
+                , struct fuse_file_info*
+#endif
+) {
   const ViewPath view = parse_project_view_path(path);
   auto engine = find_workspace_engine_for_view_path(view);
   if (engine == nullptr) return -ENOENT;
@@ -321,6 +356,13 @@ int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
   return status ? 0 : -status.error();
 }
 
+#if TRIBIOS_FUSE_API_VERSION >= 30
+void* tri_init(struct fuse_conn_info*, struct fuse_config* config) {
+  config->use_ino = 1;
+  return nullptr;
+}
+#endif
+
 fuse_operations create_fuse_operations() {
   fuse_operations ops{};
   ops.getattr = tri_getattr;
@@ -350,6 +392,9 @@ fuse_operations create_fuse_operations() {
   ops.flush = tri_flush;
   ops.fsync = tri_fsync;
   ops.fsyncdir = tri_fsyncdir;
+#if TRIBIOS_FUSE_API_VERSION >= 30
+  ops.init = tri_init;
+#endif
   return ops;
 }
 
@@ -357,11 +402,25 @@ fuse_operations create_fuse_operations() {
 
 bool mount_supported() { return true; }
 
+std::string mount_unavailable_reason() { return {}; }
+
 OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::path& mount_point,
                               bool debug) {
+#ifndef __APPLE__
+  if (::access("/dev/fuse", F_OK) != 0) {
+    return error("/dev/fuse is unavailable: load the Linux fuse module or expose the device to "
+                 "this environment");
+  }
+  if (::access("/dev/fuse", R_OK | W_OK) != 0) {
+    return error("the invoking user cannot read and write /dev/fuse: check the device "
+                 "permissions and the user's fuse group membership");
+  }
+#endif
+
   glb_project_manager = &manager;
   std::error_code ec;
   std::filesystem::create_directories(mount_point, ec);
+  if (ec) return error("cannot prepare mount point " + mount_point.string() + ": " + ec.message());
 
   // Multi-threaded on purpose: eight concurrent Workspaces must not queue
   // behind one another. default_permissions has the kernel enforce the modes
@@ -369,11 +428,11 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
   // use_ino keeps the engine's own inode numbers instead of letting the FUSE
   // library invent one per lookup, which is what lets Git's index stay valid
   // once the kernel has evicted and re-looked-up a Workspace file.
-  std::vector<std::string> arguments{"tribios",  mount_point.string(), "-f",
-                                     "-o",       "default_permissions", "-o",
-                                     "use_ino"};
+  std::vector<std::string> arguments{"tribios", mount_point.string(), "-f", "-o",
+                                     "default_permissions"};
 #ifdef __APPLE__
-  arguments.insert(arguments.end(), {"-o", "volname=Tribios", "-o", "noappledouble"});
+  arguments.insert(arguments.end(),
+                   {"-o", "use_ino", "-o", "volname=Tribios", "-o", "noappledouble"});
 #endif
   if (debug) arguments.push_back("-d");
   std::vector<char*> argv;
@@ -392,8 +451,8 @@ void request_unmount(const std::filesystem::path& mount_point) {
     run_process_and_capture_output({"diskutil", "unmount", "force", mount_point.string()});
   }
 #else
-  // An unprivileged Linux user unmounts through fusermount.
-  if (!run_process_and_capture_output({"fusermount", "-u", mount_point.string()}).ok()) {
+  // An unprivileged Linux user unmounts through the libfuse3 helper.
+  if (!run_process_and_capture_output({"fusermount3", "-u", mount_point.string()}).ok()) {
     run_process_and_capture_output({"umount", mount_point.string()});
   }
 #endif

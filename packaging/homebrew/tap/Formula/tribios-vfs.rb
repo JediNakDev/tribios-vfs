@@ -23,9 +23,8 @@ class TribiosVfs < Formula
   # JediNakDev/tribios-vfs#20 tracks that constraint.
   depends_on cask: "macfuse"
 
-  # Tribios speaks the FUSE 2.x API. On Linux that means libfuse 2.x, which
-  # Homebrew does not package, so the tap is macOS-only for now. The tap README
-  # records the Linux route: build from source against libfuse-dev.
+  # Linux uses libfuse3 and the host's /dev/fuse device. The tap supports macOS
+  # only; its README records the Linux route through distribution packages.
   depends_on :macos
 
   def install

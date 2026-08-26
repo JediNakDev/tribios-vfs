@@ -129,8 +129,8 @@ int main(int argc, char** argv) {
       std::cerr << "tribios_daemon: mount did not become ready within the timeout\n";
     }
   } else if (mount) {
-    std::cerr << "tribios_daemon: no FUSE backend in this build, serving "
-                 "control only\n";
+    std::cerr << "tribios_daemon: " << tribios::mount_unavailable_reason()
+              << "; serving control only\n";
   }
 
   std::cerr << "tribios_daemon: serving " << paths.root << " on " << paths.socket << "\n";

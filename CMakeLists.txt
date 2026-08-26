@@ -32,35 +32,50 @@ add_library(tribios_control STATIC
 )
 target_link_libraries(tribios_control PUBLIC tribios_core)
 
-# The FUSE adapter is the only operating-system specific component. It speaks
-# the FUSE 2.x API: macFUSE on macOS, libfuse 2.x on Linux.
+# The FUSE adapter is the only operating-system specific component. macOS uses
+# the API supplied by macFUSE, while Linux uses libfuse3.
 #   macOS:  brew install --cask macfuse
-#   Debian: apt-get install libfuse-dev
+#   Debian: apt-get install libfuse3-dev fuse3
 option(TRIBIOS_ENABLE_FUSE "Build the mounted FUSE backend" ON)
+set(FUSE_FOUND FALSE)
 if(TRIBIOS_ENABLE_FUSE)
-  pkg_check_modules(FUSE IMPORTED_TARGET fuse)
-  if(NOT FUSE_FOUND)
-    pkg_check_modules(FUSE IMPORTED_TARGET osxfuse)
+  if(APPLE)
+    pkg_check_modules(FUSE IMPORTED_TARGET fuse)
+    if(NOT FUSE_FOUND)
+      pkg_check_modules(FUSE IMPORTED_TARGET osxfuse)
+    endif()
+    if(FUSE_FOUND)
+      set(TRIBIOS_FUSE_API_VERSION 26)
+    endif()
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    pkg_check_modules(FUSE IMPORTED_TARGET fuse3)
+    if(FUSE_FOUND)
+      set(TRIBIOS_FUSE_API_VERSION 31)
+    endif()
   endif()
 endif()
 if(FUSE_FOUND)
   add_library(tribios_fuse STATIC src/fuse/fuse_adapter.cpp)
   target_link_libraries(tribios_fuse PUBLIC tribios_core PkgConfig::FUSE)
-  target_compile_definitions(tribios_fuse PUBLIC TRIBIOS_HAVE_FUSE=1)
-  message(STATUS "tribios: FUSE ${FUSE_VERSION} found, mount support enabled")
+  target_compile_definitions(tribios_fuse PUBLIC
+    TRIBIOS_HAVE_FUSE=1
+    TRIBIOS_FUSE_API_VERSION=${TRIBIOS_FUSE_API_VERSION})
+  message(STATUS
+    "tribios: FUSE ${FUSE_VERSION} API ${TRIBIOS_FUSE_API_VERSION} found, mount support enabled")
 else()
   add_library(tribios_fuse STATIC src/fuse/fuse_adapter_stub.cpp)
   target_link_libraries(tribios_fuse PUBLIC tribios_core)
   if(NOT TRIBIOS_ENABLE_FUSE)
     message(STATUS "tribios: FUSE backend disabled, building without mount support")
+  elseif(APPLE)
+    message(STATUS
+      "tribios: macFUSE was not found; install it with `brew install --cask macfuse`. Building without mount support")
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(STATUS
+      "tribios: libfuse3 was not found; install libfuse3-dev and fuse3. Building without mount support")
   else()
-    pkg_check_modules(FUSE3 fuse3)
-    if(FUSE3_FOUND)
-      message(WARNING "tribios: found FUSE 3 only; Tribios needs the FUSE 2.x API "
-                      "(macfuse or libfuse-dev). Building without mount support.")
-    else()
-      message(STATUS "tribios: no FUSE backend found, building without mount support")
-    endif()
+    message(STATUS
+      "tribios: no FUSE backend is supported on this operating system, building without mount support")
   endif()
 endif()
 

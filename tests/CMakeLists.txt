@@ -24,6 +24,7 @@ set(TRIBIOS_DESIGN_TESTS
   end_to_end_build
   packaging_install
   packaging_rpm_spec
+  linux_fuse3_build
 )
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)

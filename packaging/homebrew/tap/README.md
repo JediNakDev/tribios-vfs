@@ -58,11 +58,11 @@ The formula should work there, but nobody has run it, so it is not a support cla
 
 This tap is macOS-only, declared with `depends_on :macos`.
 
-Tribios needs the FUSE 2.x API, and Homebrew on Linux packages neither libfuse 2 nor a kernel-side FUSE.
-On Linux, build from source against the distribution's own `libfuse-dev`:
+Tribios needs libfuse3 on Linux, and Homebrew does not supply the kernel-side FUSE device.
+On Linux, build from source against the distribution's own `libfuse3-dev`:
 
 ```sh
-sudo apt-get install cmake ninja-build pkg-config libsqlite3-dev libfuse-dev
+sudo apt-get install cmake ninja-build pkg-config libsqlite3-dev libfuse3-dev fuse3
 cmake -S . -B build -G Ninja && ninja -C build && sudo cmake --install build
 ```
 
