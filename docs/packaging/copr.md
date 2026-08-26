@@ -45,18 +45,24 @@ It is tracked in issue #23 and is not enabled here.
 
 ## Setting up the Copr project
 
-One-time, from a Fedora account with a Copr login:
+[`packaging/publish-copr-preview.sh`](../../packaging/publish-copr-preview.sh) runs the whole procedure in one pass: it publishes the tag, verifies the archive checksum, creates the project and its chroots, points the package at the tag, builds, runs the container acceptance for every chroot matching the local architecture, and prints the project URL, repository slug, build ID and checksum worth recording.
+It is safe to re-run: it leaves an existing tag, project or package alone.
+
+The manual equivalent, one-time, from a Fedora account with a Copr login:
 
 1. Create the project `tribios-vfs` and enable the chroots above.
-2. Add a package with the **Custom** source type, pointing at this repository.
-   The build command is `make -f .copr/Makefile srpm outdir=$outdir`, which [`.copr/Makefile`](../../.copr/Makefile) implements: it downloads the release archive named in `Source0` and builds a source RPM from the spec.
+2. Add a package with the **SCM** source type pointing at this repository, spec `packaging/rpm/tribios-vfs.spec`, and the **make srpm** build method.
+   Copr then runs `make -f .copr/Makefile srpm outdir=<dir>`, which [`.copr/Makefile`](../../.copr/Makefile) implements: it downloads the release archive named in `Source0` and builds a source RPM from the spec.
+   Point the committish at the release tag, not at a branch, so a rebuild reproduces the same source RPM.
 3. Enable the GitHub webhook if builds should follow pushes, or trigger each release by hand.
 
 Then, per release:
 
 ```sh
-copr-cli build tribios-vfs --nowait
+copr-cli build-package --name tribios-vfs <owner>/tribios-vfs
 ```
+
+[`packaging/publish-copr-preview.sh`](../../packaging/publish-copr-preview.sh) walks the whole procedure, from the tag through the per-chroot container runs, and records the values worth keeping.
 
 ## Prerelease ordering
 
