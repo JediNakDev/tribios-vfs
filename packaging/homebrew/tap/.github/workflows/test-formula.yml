@@ -1,0 +1,67 @@
+name: Test the formula
+
+# Installs the formula the way a user does, from the tap on a clean runner, and
+# then runs `brew test`, which drives the core Tribios workflow end to end.
+#
+# The runner cannot approve the macFUSE system extension, so nothing here
+# mounts. `brew test` uses `daemon start --no-mount`, which exercises the same
+# Workspace engine through the `tribios fs` seam.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # A formula breaks when its dependencies move, not when the tap changes.
+    - cron: "0 6 * * 1"
+
+jobs:
+  install-from-the-tap:
+    name: brew install and brew test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both are Apple Silicon, which is what the free runner fleet offers.
+        # Intel macOS is untested; the tap README says so rather than implying
+        # a platform nobody runs.
+        os: [macos-14, macos-15]
+
+    steps:
+      - name: Check out the tap
+        uses: actions/checkout@v4
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Register this checkout as the tap
+        run: |
+          brew tap-new JediNakDev/tap --no-git
+          tap_dir="$(brew --repository JediNakDev/tap)"
+          rm -rf "$tap_dir/Formula"
+          cp -R Formula "$tap_dir/Formula"
+
+      - name: Audit the formula
+        run: brew audit --online JediNakDev/tap/tribios-vfs
+
+      - name: Install from the tap
+        run: brew install --verbose JediNakDev/tap/tribios-vfs
+
+      - name: Run the formula test
+        run: brew test --verbose JediNakDev/tap/tribios-vfs
+
+      - name: Check the installed layout
+        run: |
+          prefix="$(brew --prefix tribios-vfs)"
+          for staged in bin/tribios libexec/tribios/tribios_daemon \
+                        share/doc/tribios-vfs/README.md share/doc/tribios-vfs/LICENSE; do
+            [ -f "$prefix/$staged" ] || { echo "missing $staged" >&2; exit 1; }
+          done
+          # The install is not an SDK: no headers, no static libraries.
+          if find "$prefix" \( -name '*.a' -o -name '*.h' -o -name '*.hpp' \) | grep -q .; then
+            echo "the formula staged internal headers or static libraries" >&2
+            exit 1
+          fi
+
+      - name: Uninstall
+        run: brew uninstall tribios-vfs

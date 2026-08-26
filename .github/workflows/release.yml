@@ -51,3 +51,56 @@ jobs:
             --generate-notes \
             --prerelease \
             "$name.tar.gz" "$name.tar.gz.sha256"
+
+  update-homebrew-tap:
+    name: Point the Homebrew tap at the new release
+    needs: publish-archive
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Load the tap deploy key
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "HOMEBREW_TAP_DEPLOY_KEY is not set, so the tap cannot be updated." >&2
+            echo "Add a write-enabled deploy key for JediNakDev/homebrew-tap as that" >&2
+            echo "secret. packaging/homebrew/README.md explains it." >&2
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          # The secret is stored with its trailing newline stripped, and ssh
+          # rejects a private key whose final line is unterminated.
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/tap_deploy_key
+          chmod 600 ~/.ssh/tap_deploy_key
+          ssh-keyscan github.com > ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pin the formula to the published archive
+        run: packaging/homebrew/update-formula.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Push the formula to the tap
+        env:
+          # IdentitiesOnly stops ssh offering any other key the runner happens
+          # to have, which would authenticate as the wrong principal.
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/tap_deploy_key -o IdentitiesOnly=yes"
+        run: |
+          git clone git@github.com:JediNakDev/homebrew-tap.git tap
+          # The tap repository is generated wholesale from packaging/homebrew/tap,
+          # README and CI included, so the tap is never edited by hand. The
+          # trailing /. copies the dotfiles a glob would miss.
+          cp -R packaging/homebrew/tap/. tap/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "the tap is already up to date"
+            exit 0
+          fi
+          git commit -m "tribios-vfs ${GITHUB_REF_NAME}"
+          # HEAD:main rather than a bare push, so this works on a tap repository
+          # that was created empty and has no upstream branch yet.
+          git push origin HEAD:main
