@@ -251,6 +251,8 @@ else
   say "A Fedora account is not a Copr session: you have to log in on the Copr site."
   open_url "https://copr.fedorainfracloud.org/"
   step "Click Login at the top right and complete the Fedora account sign-in."
+  warn "sign in with your Fedora account name in lowercase, never your email address:"
+  note "an email address is the usual cause of a redirect loop back to accounts.fedoraproject.org"
   step "You are logged in when your username appears at the top right of the Copr page."
   note "if the sign-in refuses you, activate the account and accept the agreement at"
   note "https://accounts.fedoraproject.org/ first, then come back"
@@ -261,9 +263,16 @@ else
   note "still seeing LOGIN_TO_REVEAL? the browser that opened is not the one you"
   note "logged in with, so paste the URL into the logged-in browser by hand"
   mkdir -p "$HOME/.config"
-  pause "Press Enter to open an editor for ~/.config/copr, then paste and save"
-  "${EDITOR:-vi}" "$HOME/.config/copr"
-  chmod 600 "$HOME/.config/copr"
+  printf '\n  %sPaste the whole block here, then press Ctrl-D on a new line:%s\n\n' \
+    "$BOLD" "$RESET"
+  # Copied out of a web page the block often arrives indented, and copr-cli
+  # wants the keys at the start of the line.
+  TOKEN_BLOCK="$(sed 's/^[[:space:]]*//')"
+  [[ -n "$TOKEN_BLOCK" ]] || die "nothing was pasted; re-run once you have the block"
+  # The token is a credential, so the file is created unreadable to anyone else
+  # before a single byte of it lands on disk.
+  ( umask 077; printf '%s\n' "$TOKEN_BLOCK" > "$HOME/.config/copr" )
+  say "saved to $HOME/.config/copr"
 fi
 
 # Checked on every run, not just after a fresh paste: a half-finished earlier
@@ -272,7 +281,7 @@ fi
 ! grep -q LOGIN_TO_REVEAL "$HOME/.config/copr" ||
   die "$HOME/.config/copr holds the logged-out placeholder; log in to Copr, copy the block again, and re-run"
 grep -q '^token' "$HOME/.config/copr" ||
-  die "no token line in $HOME/.config/copr; paste the whole [copr-cli] block and re-run"
+  die "no token line in $HOME/.config/copr; delete it and re-run, pasting the whole [copr-cli] block"
 
 COPR_OWNER="$(sed -n 's/^username[[:space:]]*=[[:space:]]*//p' "$HOME/.config/copr" | head -1)"
 [[ -n "$COPR_OWNER" ]] || die "no username in ~/.config/copr; the pasted block is incomplete"
