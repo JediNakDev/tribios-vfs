@@ -236,11 +236,8 @@ say "container runtime: $CONTAINER"
 note "the acceptance containers run on $(uname -m), so that is the architecture they prove"
 
 [[ -z "$(git status --porcelain)" ]] || die "the working tree is dirty; commit or clean it first"
-git fetch --quiet origin
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-say "on branch $BRANCH at $(git rev-parse --short HEAD)"
-step "The packaging work must be merged before tagging, so this should be the default branch, up to date with origin."
-confirm "Is this the commit you want to release as $TAG?" || die "stopping; check out the commit you want to release"
+say "on branch $(git rev-parse --abbrev-ref HEAD) at $(git rev-parse --short HEAD)"
+note "this wizard never tags and never pushes; it only reads the release you published"
 
 # ── 2 ─────────────────────────────────────────────────────────────────────
 stage "Copr API token"
@@ -280,25 +277,21 @@ write_env COPR_SLUG "$COPR_SLUG"
 write_env COPR_PROJECT_URL "$COPR_PROJECT_URL"
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
-stage "Publish the $TAG release"
-say "The spec fetches the release archive, so nothing can build until the tag exists."
-warn "A published tag is never re-cut, moved or overwritten: downstream recipes pin its checksum."
+stage "Check the $TAG release"
+say "The spec fetches the release archive, so nothing can build until $TAG is released."
 
-if gh release view "$TAG" >/dev/null 2>&1; then
-  say "$TAG is already released; leaving it alone."
-else
-  confirm "Create and push the tag $TAG now?" || die "stopping before the irreversible step"
-  git tag -a "$TAG" -m "$TAG"
-  git push origin "$TAG"
-  say "pushed $TAG; the release workflow builds the archive and its checksum."
+if ! gh release view "$TAG" >/dev/null 2>&1; then
+  warn "$TAG is not released yet, and tagging is yours to do, not this wizard's."
+  say "From the merged commit you want to release:"
+  say ""
+  say "    git tag -a $TAG -m $TAG"
+  say "    git push origin $TAG"
+  say ""
+  say "The release workflow then builds the archive and its checksum."
   open_url "https://github.com/$GITHUB_SLUG/actions/workflows/release.yml"
-  until gh release view "$TAG" >/dev/null 2>&1; do
-    printf '  %s… waiting for the release workflow%s\r' "$DIM" "$RESET"
-    sleep 15
-  done
-  printf '\n'
+  die "re-run this wizard once the release is published"
 fi
-say "release published: https://github.com/$GITHUB_SLUG/releases/tag/$TAG"
+say "release found: https://github.com/$GITHUB_SLUG/releases/tag/$TAG"
 write_env RELEASE_TAG "$TAG"
 
 # ── 4 ─────────────────────────────────────────────────────────────────────

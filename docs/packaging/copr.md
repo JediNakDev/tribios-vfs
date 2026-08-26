@@ -45,8 +45,10 @@ It is tracked in issue #23 and is not enabled here.
 
 ## Setting up the Copr project
 
-[`packaging/publish-copr-preview.sh`](../../packaging/publish-copr-preview.sh) runs the whole procedure in one pass: it publishes the tag, verifies the archive checksum, creates the project and its chroots, points the package at the tag, builds, runs the container acceptance for every chroot matching the local architecture, and prints the project URL, repository slug, build ID and checksum worth recording.
-It is safe to re-run: it leaves an existing tag, project or package alone.
+[`packaging/publish-copr-preview.sh`](../../packaging/publish-copr-preview.sh) runs the whole procedure in one pass: it verifies the published archive against its checksum, creates the project and its chroots, points the package at the tag, builds, runs the container acceptance for every chroot matching the local architecture, and prints the project URL, repository slug, build ID and checksum worth recording.
+It never tags and never pushes.
+Tagging the release stays a deliberate act, and the wizard stops with instructions if the tag it needs is not published yet.
+It is safe to re-run: it leaves an existing project or package alone.
 
 The manual equivalent, one-time, from a Fedora account with a Copr login:
 
