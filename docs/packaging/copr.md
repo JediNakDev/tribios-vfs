@@ -41,7 +41,7 @@ The spec carries no conditionals for arbitrary RHEL derivatives; Fedora's packag
 
 Amazon Linux 2023 is a separate build target, not a relabelled EPEL binary.
 AWS states that no EPEL version is binary compatible with AL2023, so it needs its own build and its own test in an Amazon Linux environment.
-It is tracked in its own issue and is not enabled here.
+It is tracked in issue #23 and is not enabled here.
 
 ## Setting up the Copr project
 
