@@ -82,5 +82,12 @@ install(TARGETS tribios RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS tribios_daemon RUNTIME DESTINATION ${TRIBIOS_DAEMON_LIBEXEC_DIR})
 install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
-enable_testing()
-add_subdirectory(tests)
+# Packagers build from a release archive in a network-isolated chroot, and the
+# unit tier fetches Catch2 at configure time. Turning the tests off keeps that
+# fetch, and the Python interpreter the benchmark harness test needs, out of a
+# packaging build.
+option(TRIBIOS_BUILD_TESTS "Build and register the test suite" ON)
+if(TRIBIOS_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

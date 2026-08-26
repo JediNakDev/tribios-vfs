@@ -51,6 +51,10 @@ Tribios publishes no C++ SDK and no CMake package config.
 Setting `TRIBIOS_DAEMON` overrides the lookup.
 
 The build requires CMake 3.24 or newer, a C++23 compiler, `pkg-config`, SQLite 3, and the FUSE 2.x API: `libfuse-dev` on Linux, the macFUSE cask on macOS.
+Configuring with `-DTRIBIOS_BUILD_TESTS=OFF` skips the test suite, and with it the Catch2 fetch that would otherwise need network access at configure time.
+Packaging recipes building in an isolated chroot use it; `packaging/aur/README.md` is the worked example.
+A downstream recipe may add its distribution's own conventional files beside the four above, such as the Arch `usr/share/licenses/tribios-vfs/LICENSE` copy.
+
 Configuring with `-DTRIBIOS_ENABLE_FUSE=OFF`, or building where no FUSE 2.x library is found, produces a working binary without mount support.
 FUSE 3 is detected and reported but not used.
 

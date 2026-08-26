@@ -1,0 +1,39 @@
+# Maintainer: Pitchayut Ariyachansil <pitch.jedi@gmail.com>
+
+pkgname=tribios-vfs
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Copy-on-write FUSE workspaces for parallel coding agents"
+arch=('x86_64' 'aarch64')
+url="https://github.com/JediNakDev/tribios-vfs"
+license=('MIT')
+depends=('sqlite' 'fuse2' 'gcc-libs' 'glibc')
+makedepends=('cmake' 'ninja' 'pkgconf')
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+# Filled in by packaging/aur/update-recipe.sh from the published checksum file.
+# Never 'SKIP': downstream recipes pin the archive the release contract fixes.
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+build() {
+  # The test tier fetches Catch2 at configure time, which a clean chroot has no
+  # network for, so the packaging build turns it off.
+  cmake -S "$pkgname-$pkgver" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+    -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
+    -DTRIBIOS_BUILD_TESTS=OFF
+  cmake --build build
+}
+
+check() {
+  # The build installs no test binaries, so the check is that the CLI the
+  # package ships runs and reports the version this recipe claims.
+  test "$(./build/tribios version)" = "tribios $pkgver"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 "$pkgname-$pkgver/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

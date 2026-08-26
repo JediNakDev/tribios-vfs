@@ -1,0 +1,19 @@
+pkgbase = tribios-vfs
+	pkgdesc = Copy-on-write FUSE workspaces for parallel coding agents
+	pkgver = 0.0.1
+	pkgrel = 1
+	url = https://github.com/JediNakDev/tribios-vfs
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cmake
+	makedepends = ninja
+	makedepends = pkgconf
+	depends = sqlite
+	depends = fuse2
+	depends = gcc-libs
+	depends = glibc
+	source = tribios-vfs-0.0.1.tar.gz::https://github.com/JediNakDev/tribios-vfs/releases/download/v0.0.1/tribios-vfs-0.0.1.tar.gz
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = tribios-vfs
