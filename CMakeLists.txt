@@ -82,5 +82,10 @@ install(TARGETS tribios RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS tribios_daemon RUNTIME DESTINATION ${TRIBIOS_DAEMON_LIBEXEC_DIR})
 install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
-enable_testing()
-add_subdirectory(tests)
+# A distribution package build configures with the tests off: the unit tier
+# fetches Catch2 at configure time, and a package builder has no network.
+option(TRIBIOS_BUILD_TESTS "Build the test suite" ON)
+if(TRIBIOS_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

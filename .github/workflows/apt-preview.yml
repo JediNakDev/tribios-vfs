@@ -1,0 +1,210 @@
+name: APT preview repository
+
+# Builds one .deb per tested suite, proves each one installs in a clean
+# container, then republishes the signed APT repository on the gh-pages branch.
+#
+# The suite matrix comes from packaging/apt/suites.txt, which is also what
+# docs/install/debian-ubuntu.md documents and what the design tier checks, so a
+# suite cannot be built without being documented as tested.
+#
+# The repository is project-owned rather than a Launchpad PPA because a PPA
+# covers Ubuntu only, and issue #17 asks for Debian as well.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The tag to build
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apt-preview
+  cancel-in-progress: false
+
+env:
+  APT_BASE_URL: https://jedinakdev.github.io/tribios-vfs/apt
+
+jobs:
+  suite-matrix:
+    name: Read the tested-suite matrix
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.read.outputs.suites }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - id: read
+        run: |
+          suites="$(grep -v '^[[:space:]]*#' packaging/apt/suites.txt |
+            grep -v '^[[:space:]]*$' |
+            awk '{printf "{\"suite\":\"%s\",\"image\":\"%s\",\"arch\":\"%s\"}\n", $1, $2, $3}' |
+            paste -sd, -)"
+          echo "suites=[$suites]" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.suite }}
+    needs: suite-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.suite-matrix.outputs.suites) }}
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install git for the checkout action
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Build the package
+        # The output goes outside the checkout so the source copy the script
+        # makes cannot pick up its own output directory.
+        run: packaging/apt/build-deb.sh "${{ matrix.suite }}" . "$RUNNER_TEMP/out/${{ matrix.suite }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.suite }}
+          path: ${{ runner.temp }}/out/${{ matrix.suite }}/*.deb
+          if-no-files-found: error
+
+  verify:
+    name: Install ${{ matrix.suite }} in a clean container
+    needs: [suite-matrix, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.suite-matrix.outputs.suites) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb-${{ matrix.suite }}
+          path: incoming
+
+      # An upgrade needs a real previous preview. There is none before the first
+      # publication, and then only the clean-install half runs.
+      - name: Fetch the currently published package, if any
+        id: previous
+        run: |
+          path="$(packaging/apt/fetch-published-deb.sh "$APT_BASE_URL" \
+            "${{ matrix.suite }}" "${{ matrix.arch }}" previous)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "previous package: ${path:-none}"
+
+      - name: Install and run the core workflow in a clean ${{ matrix.image }}
+        run: |
+          upgrade_argument=""
+          if [ -n "${{ steps.previous.outputs.path }}" ]; then
+            upgrade_argument="--upgrade-from /work/${{ steps.previous.outputs.path }}"
+          fi
+          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" \
+            bash packaging/apt/verify-install.sh \
+            --deb "/work/$(ls incoming/*.deb | head -1)" $upgrade_argument
+
+  publish:
+    name: Publish the signed repository
+    needs: [suite-matrix, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          path: source
+
+      - name: Check out the published repository branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: incoming
+
+      # download-artifact names each directory deb-<suite>; the repository
+      # script expects one directory per suite.
+      - name: Lay the incoming packages out by suite
+        run: |
+          mkdir -p by-suite
+          for directory in incoming/deb-*; do
+            mv "$directory" "by-suite/$(basename "$directory" | sed 's/^deb-//')"
+          done
+
+      - name: Import the repository signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          test -n "$APT_SIGNING_KEY" || { echo "the APT_SIGNING_KEY secret is not set" >&2; exit 1; }
+          printf '%s' "$APT_SIGNING_KEY" | gpg --batch --import
+
+      - name: Regenerate the repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils
+          source/packaging/apt/build-apt-repo.sh pages/apt by-suite "${{ secrets.APT_SIGNING_KEY_ID }}"
+
+      - name: Publish
+        run: |
+          cd pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A apt
+          # Re-running the workflow for a tag that is already published leaves
+          # the tree identical, and `git commit` would fail on an empty commit.
+          if git diff --cached --quiet; then
+            echo "the published repository is already up to date"
+            exit 0
+          fi
+          git commit -m "apt: publish ${{ inputs.ref || github.ref_name }}"
+          git push
+
+  verify-from-repository:
+    name: apt-get install on ${{ matrix.suite }}
+    needs: [suite-matrix, publish]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.suite-matrix.outputs.suites) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      # GitHub Pages serves the new commit a little after the push returns.
+      - name: Wait for the published index to carry this version
+        run: |
+          version="$(packaging/apt/deb_version.sh "${{ matrix.suite }}")"
+          for attempt in $(seq 1 60); do
+            if curl -fsSL "$APT_BASE_URL/dists/${{ matrix.suite }}/main/binary-${{ matrix.arch }}/Packages" |
+               grep -q "^Version: $version$"; then
+              echo "published"; exit 0
+            fi
+            sleep 20
+          done
+          echo "the published index never carried $version" >&2
+          exit 1
+
+      - name: apt-get install tribios-vfs in a clean ${{ matrix.image }}
+        run: |
+          curl -fsSL "$APT_BASE_URL/tribios-vfs.asc" -o key.asc
+          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" \
+            bash packaging/apt/verify-install.sh \
+            --from-repo "$APT_BASE_URL" --key /work/key.asc --suite "${{ matrix.suite }}"

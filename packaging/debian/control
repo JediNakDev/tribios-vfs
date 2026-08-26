@@ -1,0 +1,26 @@
+Source: tribios-vfs
+Section: utils
+Priority: optional
+Maintainer: Pitchayut Ariyachansil <pitch.jedi@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.24),
+               pkg-config,
+               libsqlite3-dev,
+               libfuse-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/JediNakDev/tribios-vfs
+Rules-Requires-Root: no
+
+Package: tribios-vfs
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, fuse, git
+Description: virtual filesystem for parallel agent workspaces
+ Tribios VFS gives many isolated development workspaces a shared, immutable
+ Base state and a private copy-on-write upper tree, so creating, mutating and
+ destroying a workspace costs roughly what the workspace itself changed rather
+ than what the repository contains.
+ .
+ This is a preview package from a project-owned repository. The command
+ surface, the on-disk metadata format and the mounted filesystem semantics are
+ the documented compatibility surface, and Tribios is still at 0.y.z, so a
+ minor version may break any of them.

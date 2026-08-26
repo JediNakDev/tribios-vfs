@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+# The package build is a plain CMake build of the upstream install rules; the
+# staged layout is docs/release-and-install-contract.md, not a Debian-only one.
+
+%:
+	dh $@ --buildsystem=cmake
+
+# The unit tier fetches Catch2 at configure time. A package builder has no
+# network, and the tier ladder has already run in CI on the tagged tree, so the
+# package build configures the tests off and does not run them.
+override_dh_auto_configure:
+	dh_auto_configure -- -DTRIBIOS_BUILD_TESTS=OFF -DTRIBIOS_ENABLE_FUSE=ON
+
+override_dh_auto_test:
