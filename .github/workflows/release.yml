@@ -104,3 +104,64 @@ jobs:
           # HEAD:main rather than a bare push, so this works on a tap repository
           # that was created empty and has no upstream branch yet.
           git push origin HEAD:main
+
+  update-aur-package:
+    name: Point the AUR package at the new release
+    needs: publish-archive
+    runs-on: ubuntu-latest
+    # makepkg generates .SRCINFO and refuses to run outside Arch, so the whole
+    # job runs in an Arch container rather than shipping a hand-kept .SRCINFO.
+    container: archlinux:base-devel
+
+    steps:
+      - name: Install the tools the container does not ship
+        run: pacman -Syu --noconfirm git openssh
+
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Check that the AUR key exists
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY is not set, so the AUR package cannot be updated." >&2
+            echo "Add the private half of the SSH key registered on the AUR account" >&2
+            echo "as a repository secret. packaging/aur/README.md explains it." >&2
+            exit 1
+          fi
+
+      - name: Pin the recipe to the published archive
+        # makepkg refuses to run as root, and the checkout is owned by root, so
+        # the recipe is regenerated as an unprivileged user.
+        run: |
+          useradd --create-home --shell /bin/bash aur
+          cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO /home/aur/
+          chown -R aur /home/aur
+          su aur -c "packaging/aur/update-recipe.sh '${GITHUB_REF_NAME#v}' /home/aur"
+
+      - name: Push the recipe to the AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          install -d -m 700 /home/aur/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /home/aur/.ssh/id_ed25519
+          chmod 600 /home/aur/.ssh/id_ed25519
+          ssh-keyscan aur.archlinux.org > /home/aur/.ssh/known_hosts
+          chown -R aur /home/aur/.ssh
+          su aur -c '
+            set -e
+            cd /home/aur
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git clone ssh://aur@aur.archlinux.org/tribios-vfs.git aur
+            cp PKGBUILD .SRCINFO aur/
+            cd aur
+            git add -A
+            if git diff --cached --quiet; then
+              echo "the AUR package is already up to date"
+              exit 0
+            fi
+            git commit -m "tribios-vfs '"${GITHUB_REF_NAME}"'"
+            git push
+          '
