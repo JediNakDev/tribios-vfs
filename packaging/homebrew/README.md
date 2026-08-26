@@ -24,17 +24,28 @@ Create `JediNakDev/homebrew-tap` as a public repository.
 Homebrew resolves `JediNakDev/tap` to that name.
 An empty repository is enough; the first release fills it.
 
-Then give the release workflow write access to it:
+Then give the release workflow write access to it with a deploy key:
 
 ```sh
-packaging/homebrew/setup-tap-deploy-key.sh
+ssh-keygen -t ed25519 -N "" -f /tmp/tap-key -C "tribios-vfs release workflow"
+ssh-keygen -lf /tmp/tap-key.pub          # record this fingerprint
 ```
 
-The script generates the deploy key, walks you through registering it on the tap with write access, stores the private half as the `HOMEBREW_TAP_DEPLOY_KEY` Actions secret, checks against GitHub's own record of the key that it is not read-only, and prints the fingerprint to record.
-It never pushes, tags, or writes to a remote branch: the verification is read-only, so nothing lands on the tap until a real release does.
-The key only ever exists in a temp directory, so rotating it means running the script again and deleting the old key from the tap by fingerprint.
+Add `/tmp/tap-key.pub` at `https://github.com/JediNakDev/homebrew-tap/settings/keys/new`, titled `tribios-vfs release workflow`, with **Allow write access** ticked.
+Without write access the release fails at the push rather than at the clone.
+Add it from that page rather than with `gh repo deploy-key add`: a key added by `gh` is tied to the CLI's own authorization, so de-authorizing the GitHub CLI later would silently delete it and break the next release.
 
-It registers the key through the browser rather than `gh repo deploy-key add` on purpose: a key added by `gh` is tied to the CLI's own authorization, so de-authorizing the GitHub CLI later would silently delete it and break the next release.
+Then store the private half upstream and delete both copies:
+
+```sh
+gh secret set HOMEBREW_TAP_DEPLOY_KEY --repo JediNakDev/tribios-vfs < /tmp/tap-key
+gh api repos/JediNakDev/homebrew-tap/keys --jq '.[] | [.title, .read_only] | @tsv'
+rm /tmp/tap-key /tmp/tap-key.pub
+```
+
+The second command is the check that matters: `read_only` must be `false`.
+Asking GitHub's record is a better answer than a test push, and it leaves no throwaway ref on the tap.
+Rotating the key means repeating this and deleting the old key from the tap by its fingerprint.
 
 A deploy key rather than a personal access token, because this is one workflow pushing to one repository.
 The key reaches nothing but the tap, and it needs no expiry date and so no rotation.
