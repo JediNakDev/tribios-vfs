@@ -3,6 +3,7 @@
 This is the upstream contract every packaging recipe depends on.
 The Homebrew tap, the Debian source package, the Copr spec, and the AUR `PKGBUILD` all build from the same release archive and install through the same CMake rules described here.
 `docs/adr/0006-install-only-the-public-artifacts.md` records why the layout is what it is.
+`docs/packaging/copr.md` records how the Fedora and EPEL preview repository builds against it.
 
 Everything on this page is a compatibility surface.
 Changing it is a versioned change, not a refactor.
