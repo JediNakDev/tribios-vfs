@@ -115,7 +115,7 @@ jobs:
 
     steps:
       - name: Install the tools the container does not ship
-        run: pacman -Syu --noconfirm git openssh
+        run: pacman -Syu --noconfirm git openssh curl
 
       - name: Check out the tag
         uses: actions/checkout@v4
@@ -138,7 +138,7 @@ jobs:
           useradd --create-home --shell /bin/bash aur
           cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO /home/aur/
           chown -R aur /home/aur
-          su aur -c "packaging/aur/update-recipe.sh '${GITHUB_REF_NAME#v}' /home/aur"
+          su aur -c "$PWD/packaging/aur/update-recipe.sh '${GITHUB_REF_NAME#v}' /home/aur"
 
       - name: Push the recipe to the AUR
         env:
@@ -163,5 +163,8 @@ jobs:
               exit 0
             fi
             git commit -m "tribios-vfs '"${GITHUB_REF_NAME}"'"
-            git push
+            # HEAD:master rather than a bare push, because the first release
+            # pushes into a package repository the AUR creates empty, which has
+            # no upstream branch to push to. The AUR's branch is master.
+            git push origin HEAD:master
           '
