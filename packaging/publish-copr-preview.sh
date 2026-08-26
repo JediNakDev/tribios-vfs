@@ -247,16 +247,32 @@ if [[ -f "$HOME/.config/copr" ]]; then
   say "a token file already exists."
   note "tokens expire; if a later stage reports an authentication error, come back and replace it"
 else
+  say "The token page shows LOGIN_TO_REVEAL until you are logged in to Copr itself."
+  say "A Fedora account is not a Copr session: you have to log in on the Copr site."
+  open_url "https://copr.fedorainfracloud.org/"
+  step "Click Login at the top right and complete the Fedora account sign-in."
+  step "You are logged in when your username appears at the top right of the Copr page."
+  note "if the sign-in refuses you, activate the account and accept the agreement at"
+  note "https://accounts.fedoraproject.org/ first, then come back"
+  pause "Press Enter once your username is showing"
   open_url "https://copr.fedorainfracloud.org/api/"
-  step "Log in with your Fedora account."
-  step "The page shows a block starting with [copr-cli]. Copy the whole block."
-  step "Paste it into ~/.config/copr, which this wizard will open for you to fill."
+  step "The page now shows a block starting with [copr-cli], with a real login,"
+  say "  username and token instead of LOGIN_TO_REVEAL. Copy the whole block."
+  note "still seeing LOGIN_TO_REVEAL? the browser that opened is not the one you"
+  note "logged in with, so paste the URL into the logged-in browser by hand"
   mkdir -p "$HOME/.config"
-  pause "Press Enter to open an editor for ~/.config/copr"
+  pause "Press Enter to open an editor for ~/.config/copr, then paste and save"
   "${EDITOR:-vi}" "$HOME/.config/copr"
-  [[ -s "$HOME/.config/copr" ]] || die "$HOME/.config/copr is empty; re-run once you have pasted the token"
   chmod 600 "$HOME/.config/copr"
 fi
+
+# Checked on every run, not just after a fresh paste: a half-finished earlier
+# attempt leaves a file behind that looks present and is useless.
+[[ -s "$HOME/.config/copr" ]] || die "$HOME/.config/copr is empty; delete it and re-run"
+! grep -q LOGIN_TO_REVEAL "$HOME/.config/copr" ||
+  die "$HOME/.config/copr holds the logged-out placeholder; log in to Copr, copy the block again, and re-run"
+grep -q '^token' "$HOME/.config/copr" ||
+  die "no token line in $HOME/.config/copr; paste the whole [copr-cli] block and re-run"
 
 COPR_OWNER="$(sed -n 's/^username[[:space:]]*=[[:space:]]*//p' "$HOME/.config/copr" | head -1)"
 [[ -n "$COPR_OWNER" ]] || die "no username in ~/.config/copr; the pasted block is incomplete"
