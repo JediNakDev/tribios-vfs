@@ -4,7 +4,5 @@ bench/results/
 compile_commands.json
 .tribios/
 __pycache__/
-
-# Local record of the published repository URL and the signing key
-# fingerprint. No key material.
 .apt-preview.env
+.env

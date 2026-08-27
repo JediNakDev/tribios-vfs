@@ -46,11 +46,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           name="tribios-vfs-${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            --prerelease \
-            "$name.tar.gz" "$name.tar.gz.sha256"
+          # A tag that moves re-runs this job, and the release already exists by
+          # then. Re-uploading keeps the published archive a function of the
+          # tagged tree instead of leaving a stale one behind.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber \
+              "$name.tar.gz" "$name.tar.gz.sha256"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --prerelease \
+              "$name.tar.gz" "$name.tar.gz.sha256"
+          fi
 
   update-homebrew-tap:
     name: Point the Homebrew tap at the new release
