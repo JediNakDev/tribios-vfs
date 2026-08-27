@@ -7,13 +7,14 @@ Tracking issue: #15.
 Every downstream packaging recipe in #16 through #19 builds from the same upstream tree and installs through the same CMake rules.
 Nothing about those recipes can be verified until the upstream install output is fixed and documented, so the layout is a project decision rather than a per-packager one.
 
-Tribios installs exactly four files: the `tribios` command, the `tribios_daemon` helper, `README.md`, and `LICENSE`.
-The command goes to `bindir`, the daemon to `libexecdir/tribios`, and the documents to `datarootdir/doc/tribios-vfs`.
+Tribios installs the `tribios` command, the `tribios_daemon` helper, `README.md`, and `LICENSE`.
+Linux also installs the narrowly scoped `tribios_storage_service` beside the daemon and its systemd unit.
+The command goes to `bindir`, helpers go to `libexecdir/tribios`, and the documents go to `datarootdir/doc/tribios-vfs`.
 Debian and Fedora both require the license text to ship inside the binary package, which is why `LICENSE` is installed rather than merely present in the source tree.
 
-The static libraries `tribios_core`, `tribios_control`, and `tribios_fuse`, and the headers under `includes/`, are internal.
+The static libraries `tribios_core` and `tribios_control`, and the headers under `includes/`, are internal.
 They are not installed.
-Tribios has no consumers other than its own two executables, and publishing an SDK would freeze internal interfaces that the engine still changes.
+Tribios has no consumers other than its own executables, and publishing an SDK would freeze internal interfaces that still change.
 The packaging smoke test asserts that no header and no static library reaches the staging root, so an accidental SDK is a test failure rather than a compatibility promise discovered later.
 
 `tribios_daemon` is spawned by the CLI and takes a `--project` argument that only the CLI knows how to supply.
@@ -25,6 +26,10 @@ Resolution is relative to the running executable rather than compiled in as an a
 
 The daemon stays per-Project.
 Installing a machine-global service unit would define a service contract the product has not designed, and #15 lists that as a non-goal.
+
+The Linux storage service is machine-global because OverlayFS mounts must live in the host mount namespace.
+Packages install its systemd unit, while source installations enable it once through `tribios install-privileges`.
+Its interface is restricted to mount, unmount, and Btrfs deletion for authenticated callers and validated Project paths.
 
 Uninstall and upgrade never touch `.tribios` inside a Project.
 Project data lives under the user's Project directory and is never staged by `install()`, so no package manager has a path by which to remove it.

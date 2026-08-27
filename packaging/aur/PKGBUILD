@@ -3,11 +3,11 @@
 pkgname=tribios-vfs
 pkgver=0.0.1
 pkgrel=1
-pkgdesc="Copy-on-write FUSE workspaces for parallel coding agents"
+pkgdesc="Native copy-on-write workspaces for parallel coding agents"
 arch=('x86_64' 'aarch64')
 url="https://github.com/JediNakDev/tribios-vfs"
 license=('MIT')
-depends=('sqlite' 'fuse3' 'gcc-libs' 'glibc')
+depends=('sqlite' 'btrfs-progs' 'git' 'gcc-libs' 'glibc')
 makedepends=('cmake' 'ninja' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
 # Filled in by packaging/aur/update-recipe.sh from the published checksum file.

@@ -11,7 +11,7 @@
 Name:           tribios-vfs
 Version:        0.0.1
 Release:        1%{?dist}
-Summary:        Copy-on-write Workspace filesystem for Git projects
+Summary:        Native copy-on-write Workspaces for Git projects
 
 License:        MIT
 URL:            https://github.com/JediNakDev/tribios-vfs
@@ -21,7 +21,7 @@ BuildRequires:  cmake >= 3.24
 BuildRequires:  ninja-build
 BuildRequires:  pkgconfig
 BuildRequires:  pkgconfig(sqlite3)
-BuildRequires:  pkgconfig(fuse3)
+BuildRequires:  systemd-rpm-macros
 # std::expected needs libstdc++ 12 or newer. RHEL 9's system GCC is 11, so the
 # EPEL 9 build uses a toolset compiler. Fedora and EPEL 10 are new enough.
 %if 0%{?rhel} == 9
@@ -30,16 +30,13 @@ BuildRequires:  gcc-toolset-14-gcc-c++
 BuildRequires:  gcc-c++ >= 12
 %endif
 
-# The daemon mounts through libfuse3 and unmounts by running fusermount3,
-# and Workspaces are Git worktrees driven by the git command line.
-Requires:       fuse3
+Requires:       btrfs-progs
 Requires:       git-core
 
 %description
-Tribios VFS gives a Git project copy-on-write Workspaces. Each Workspace is a
-mounted view of an immutable Base state: reads fall through to the Base, the
-first write copies the whole file into the Workspace, and deletions are
-tombstones, so one Workspace never disturbs the Base state or its siblings.
+Tribios VFS gives a Git project native copy-on-write Workspaces.
+It uses Btrfs snapshots where available and kernel OverlayFS otherwise.
+One Workspace never disturbs the immutable Base state or its siblings.
 
 The daemon is per-project and is started by the user with `tribios daemon
 start`. This package installs no system service and configures no project.
@@ -53,16 +50,20 @@ start`. This package installs no system service and configures no project.
 %endif
 # The test tier fetches Catch2 over the network at configure time, which a
 # package build cannot do.
-%cmake -GNinja -DTRIBIOS_BUILD_TESTS=OFF -DTRIBIOS_ENABLE_FUSE=ON
+%cmake -GNinja -DTRIBIOS_BUILD_TESTS=OFF
 %cmake_build
-
-# Configure only warns when libfuse3 is not found and falls back to a
-# stub with no mount support. A package that silently lost mounting would still
-# build and still pass a version check, so fail the build here instead.
-grep -q TRIBIOS_HAVE_FUSE %{_vpath_builddir}/compile_commands.json
 
 %install
 %cmake_install
+
+%post
+%systemd_post tribios-storage.service
+
+%preun
+%systemd_preun tribios-storage.service
+
+%postun
+%systemd_postun_with_restart tribios-storage.service
 
 %check
 test "$(%{buildroot}%{_bindir}/tribios version)" = "tribios %{version}"
@@ -71,6 +72,8 @@ test "$(%{buildroot}%{_bindir}/tribios version)" = "tribios %{version}"
 %{_bindir}/tribios
 %dir %{_libexecdir}/tribios
 %{_libexecdir}/tribios/tribios_daemon
+%{_libexecdir}/tribios/tribios_storage_service
+%{_unitdir}/tribios-storage.service
 %dir %{_datadir}/doc/%{name}
 %license %{_datadir}/doc/%{name}/LICENSE
 %doc %{_datadir}/doc/%{name}/README.md

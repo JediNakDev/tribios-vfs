@@ -1,56 +1,44 @@
 # Tribios VFS
 
-Tribios Virtual Filesystem is a layer that run on top of FUSE (or macFUSE for macOS) that is designed to optimise parallel agent workspace.
+Tribios VFS creates persistent, isolated Workspaces for parallel coding agents.
+Each Workspace is an ordinary filesystem path backed by native copy-on-write storage.
 
-It is named after ['Tribios'](https://honkai-star-rail.fandom.com/wiki/Tribios) a character for 'Honkai: Star Rail'.
-She is a demigod (or Chrysos Heirs) that **split her soul into a thousand pieces** after taking the authority of Janus.
-
-The project is heavily inspired by [MacOS Is Making Your Mac Slow](https://youtu.be/4wVNFaFDIn8?si=UpLJ4oilWGVCGMNL) from @t3dotgg.
-tldr; APFS often struggle with modern, agentic development workflows as it introduces massive overhead when handling high volumes of small files and complex linking. He recommend moving off to Linux and use XFS combined with VDO and LZ4.
-
-Then 2 questions rise, is combining the existing solution plus some (possibly) crazy hack really a solution for a newly introduced niche(?) problem? and do we really need to change an OS just because a filesystem sucks? This is an experiment to answer them.
+The name comes from [Tribios](https://honkai-star-rail.fandom.com/wiki/Tribios), a Honkai: Star Rail character who split her soul into a thousand pieces.
+That is roughly the joke: one Project, many independent working copies.
 
 ## Install
 
-**macOS**
+### macOS
 
 ```sh
-brew install --cask macfuse
 brew install JediNakDev/tap/tribios-vfs
 ```
 
-macFUSE has to be installed first, because Tribios builds against its headers.
+Tribios uses APFS sparse images and shadows through tools included with macOS.
+It does not require macFUSE, a kernel extension, or Reduced Security.
 
-macOS will not load the macFUSE system extension until you approve it: open System Settings > Privacy & Security, allow the system software from developer "Benjamin Fleischer", then restart the Mac.
-
-**Debian and Ubuntu**
+### Debian and Ubuntu
 
 ```sh
 sudo apt install tribios-vfs
+tribios install-privileges
 ```
 
-**Fedora**
+### Fedora
 
 ```sh
 sudo dnf copr enable jedinakdev/tribios-vfs
 sudo dnf install tribios-vfs
+tribios install-privileges
 ```
 
-**Arch Linux**
+### Arch Linux
 
-```sh
-yay -S tribios-vfs
-```
+An AUR package is planned after the registry is available again.
 
-## Running
+## Use
 
-Verify the installation:
-
-```sh
-tribios version
-```
-
-Configure an existing Git project and start its daemon:
+Configure an existing Git Project and start its daemon:
 
 ```sh
 cd /path/to/project
@@ -59,11 +47,12 @@ tribios daemon start
 tribios info
 ```
 
-`tribios configure` captures the project's current files as an immutable Base state, including ignored and untracked files.
-Review the warning it prints before continuing.
-Run `tribios info` and confirm that it reports `mount backend: mounted`.
+Configuration captures the Project's current regular files, directories, and symlinks as one immutable Base state.
+Ignored and untracked files are included, so read the secrets warning before continuing.
+Tribios selects and records one storage backend for the Project.
+Pass `--growth-allowance-bytes <bytes>` during configuration when the default capacity is too small for the Project's build and dependency trees.
 
-Create a Workspace for an agent, then work inside its mounted directory:
+Create a Workspace and enter its native path:
 
 ```sh
 tribios workspace create agent-one
@@ -72,17 +61,22 @@ cd .tribios/mnt/agent-one
 ```
 
 The Workspace is a normal Git working tree on a branch named `agent-one`.
-Pass `--branch <branch>` to `workspace create` to use a different branch name.
-Use `tribios workspace create` and `tribios workspace remove` instead of `git worktree add` and `git worktree remove` because Tribios owns the mounted worktree state.
+Pass `--branch <branch>` to choose another branch name.
+Use Tribios instead of `git worktree add` and `git worktree remove` because Tribios coordinates Git state with native storage lifecycle state.
 
-Remove the Workspace and stop the daemon when you are done:
+Check writable capacity before a large build:
+
+```sh
+tribios workspace status agent-one
+```
+
+Remove the Workspace when finished:
 
 ```sh
 cd /path/to/project
 tribios workspace remove agent-one
 tribios workspace wait-reclaim
-tribios daemon stop
 ```
 
-Workspace removal returns after the Workspace disappears.
-`tribios workspace wait-reclaim` waits for its storage to be reclaimed in the background and is optional.
+Removal returns after the Workspace path becomes inaccessible.
+Physical reclamation continues in the background, and `workspace wait-reclaim` waits for it when needed.

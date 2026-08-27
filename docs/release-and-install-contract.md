@@ -33,11 +33,13 @@ No prebuilt binaries are published; each ecosystem builds from source.
 
 ## Installed layout
 
-`cmake --install` stages exactly four files, relative to the install prefix:
+`cmake --install` stages the public files below, relative to the install prefix:
 
 ```text
 bin/tribios
 libexec/tribios/tribios_daemon
+libexec/tribios/tribios_storage_service   Linux only
+lib/systemd/system/tribios-storage.service   Linux only
 share/doc/tribios-vfs/README.md
 share/doc/tribios-vfs/LICENSE
 ```
@@ -52,30 +54,31 @@ Tribios publishes no C++ SDK and no CMake package config.
 Setting `TRIBIOS_DAEMON` overrides the lookup.
 
 The build requires CMake 3.24 or newer, a C++23 compiler, `pkg-config`, and SQLite 3.
-Mounted builds use `libfuse3-dev` and `fuse3` on Linux, or the macFUSE cask on macOS.
+Linux runtime support also requires the `btrfs` command when using Btrfs.
+macOS uses `hdiutil`, which ships with the operating system.
 Configuring with `-DTRIBIOS_BUILD_TESTS=OFF` skips the test suite, and with it the Catch2 fetch that would otherwise need network access at configure time.
 Packaging recipes building in an isolated chroot use it; `packaging/aur/README.md` is the worked example.
 A downstream recipe may add its distribution's own conventional files beside the four above, such as the Arch `usr/share/licenses/tribios-vfs/LICENSE` copy.
 
-Configuring with `-DTRIBIOS_ENABLE_FUSE=OFF`, or building where the platform backend is not found, produces a working binary without mount support.
-Linux builds select libfuse3 API 31.
-macOS builds select the API 26 interface supplied by macFUSE.
+Builds have no macFUSE or libfuse dependency.
+Backend availability is probed when a Project is configured, not when Tribios is compiled.
 
 ## Command surface
 
 These command names, their options, and their output shape are stable within a minor version:
 
 ```text
-tribios configure <project> [--mount <path>] [--force]
+tribios configure <project> [--mount <path>] [--growth-allowance-bytes <bytes>] [--force]
 tribios info [--project <path>]
-tribios daemon start [--project <path>] [--no-mount]
+tribios daemon start [--project <path>]
 tribios daemon stop|status [--project <path>]
 tribios workspace create <name> [--branch <branch>] [--project <path>]
 tribios workspace list [--project <path>]
+tribios workspace status <name> [--project <path>]
 tribios workspace remove <name> [--project <path>]
 tribios workspace wait-reclaim [--project <path>]
 tribios recovery inspect [--project <path>]
-tribios fs <verb> <workspace> <args...> [--project <path>]
+tribios install-privileges
 tribios version
 tribios help
 ```
@@ -84,9 +87,8 @@ Exit codes: 0 on success, 2 for an unknown or malformed command, 1 for any other
 `tribios daemon status` exits 1 when the daemon is not running, which is a status answer rather than an error.
 Diagnostics go to standard error prefixed with `tribios: `; command results go to standard output.
 
-`tribios fs` is a direct seam onto the Workspace engine.
-It exists so the test and benchmark harness can exercise the same semantics on a build without a FUSE backend.
-It is covered by this contract because the harness depends on it, not because it is the intended way to use a Workspace.
+`tribios install-privileges` is required once on Linux after installation.
+It enables the narrowly scoped system service used for host-namespace OverlayFS mounts, unmounts, and privileged Btrfs deletion.
 
 ## Paths and environment
 
@@ -95,41 +97,39 @@ A Project is resolved from `--project`, then `TRIBIOS_PROJECT`, then the nearest
 All Project state lives under `.tribios` inside the Project:
 
 ```text
-.tribios/meta.db        SQLite metadata, format version 1
-.tribios/base           the immutable Base state
-.tribios/workspaces     per-Workspace upper trees
-.tribios/staging        staged data awaiting publication
-.tribios/mnt            the default mount point
+.tribios/meta.db        SQLite metadata, format version 2
+.tribios/base           Base-state directory or capture mount path
+.tribios/storage        private images, shadows, upper trees, and reclaim paths
+.tribios/staging        lifecycle staging data
+.tribios/mnt            default native Workspace paths
 .tribios/daemon.log     daemon output
 ```
 
 The control socket lives in `/tmp` under a name derived from the Project path, because a Unix socket path inside a deep Project directory can exceed the macOS length limit.
 It is ephemeral and is not Project state.
 
-`TRIBIOS_PROJECT` and `TRIBIOS_DAEMON` are the only environment variables in the contract.
-`TRIBIOS_REQUIRE_MOUNT`, `TRIBIOS_TEST_NO_MOUNT`, and the failpoint variables are test controls and are not.
+`TRIBIOS_PROJECT`, `TRIBIOS_DAEMON`, and `TRIBIOS_STORAGE_SERVICE_SOCKET` are the environment variables in the contract.
+The failpoint variables are test controls and are not.
 
 There is no machine-global configuration file, no system service unit, and no per-user configuration directory.
 The daemon is per-Project and is started by the user, not by the package.
 
-## Mounted filesystem semantics
+## Native filesystem semantics
 
-A mounted Workspace is a copy-on-write view: reads fall through to the Base state, and the first write copies the whole file into the Workspace's upper tree.
-Deletions are recorded as tombstones rather than by touching the Base state.
-The Base state and sibling Workspaces are never modified by activity in one Workspace.
-`docs/adr/0002-prototype-whole-file-copy-on-write-workspaces.md` and `docs/adr/0005-journal-crash-consistent-workspace-mutations.md` hold the details, including which operations are unsupported.
+Each active Workspace is a native kernel filesystem path.
+The Base state and sibling Workspaces are not modified by activity in one Workspace.
+APFS shadows and Btrfs snapshots share unchanged blocks.
+OverlayFS uses its normal lower, upper, work, and whiteout semantics.
+ADR 0007 records the storage design.
 
-Linux release builds support x86-64 and arm64 with ext4 or XFS backing storage.
-Linux path lookup is case-sensitive on those filesystems.
-Tribios reports timestamps with one-second precision on both platforms even when the host stores finer values.
-Renames are atomic within one Workspace and fail with `EXDEV` across Workspaces.
-The kernel enforces the reported permission bits, every mounted entry belongs to the invoking user, and changing ownership to another user is unsupported.
-Mounts do not enable `allow_other`, so Linux keeps the mounted view private to the invoking user by default.
-The metadata format and recovery protocol are shared between macOS and Linux.
+Linux release builds support x86-64 and arm64.
+Btrfs storage uses writable snapshots, while supported non-Btrfs local storage uses OverlayFS.
+OverlayFS mounts live in the host mount namespace and Workspace entries belong to the invoking user.
+The selected filesystem defines ordinary file behavior and durability.
 
 ## Migration contract
 
-The on-disk metadata format is versioned independently of the product version and is currently at version 1.
+The on-disk metadata format is versioned independently of the product version and is currently at version 2.
 Tribios refuses to open a Project whose metadata format it does not recognise, and reports it rather than guessing.
 
 A release that changes the format must either migrate an older Project forward on open or refuse it with an actionable message.
@@ -142,7 +142,7 @@ Configuring a Project is always an explicit `tribios configure` run by the user.
 
 ## What the packaging smoke test enforces
 
-`tests/e2e/packaging_install.sh`, in the design tier, stages an install under `DESTDIR`, asserts the layout above file for file, asserts that no header or static library was staged, runs the core workflow using only the installed CLI with `TRIBIOS_DAEMON` unset, reinstalls over the same prefix and re-reads the Workspace data, then removes every file in the install manifest and asserts that `.tribios` survives intact.
+`tests/e2e/packaging_install.sh`, in the design tier, stages an install under `DESTDIR`, asserts the platform layout above file for file, and asserts that no header, static library, FUSE binary, or FUSE dependency was staged.
 
 It does not cover a version-to-version metadata migration.
 That test arrives with the first release that changes the metadata format.

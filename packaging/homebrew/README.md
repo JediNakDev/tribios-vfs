@@ -69,6 +69,5 @@ The tap's own CI runs the same thing on a clean runner on every push.
 
 ## homebrew/core
 
-Not a target for now.
-Core formulae may not depend on a cask, Tribios needs the macFUSE cask, and core also requires a stable upstream release.
-[Issue #20](https://github.com/JediNakDev/tribios-vfs/issues/20) tracks the constraint and the ways out of it.
+The native APFS backend removes the old macFUSE cask blocker.
+A core submission still waits for a stable upstream release.

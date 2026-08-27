@@ -43,8 +43,8 @@ podman run --rm -it -v "$PWD/packaging/aur:/recipe:ro" archlinux:base-devel bash
                namcap PKGBUILD *.pkg.tar.zst && tribios version"'
 ```
 
-That covers the acceptance criteria except the mounted workflow: mounting inside a container needs `--device /dev/fuse --cap-add SYS_ADMIN`.
-Without those, run the core workflow through `tribios fs`, which drives the same Workspace engine without a mount.
+That covers the package layout and version checks.
+Run the native Btrfs or OverlayFS lifecycle tests on a disposable Linux host after installing the privileged helper.
 
 ## Publishing by hand
 

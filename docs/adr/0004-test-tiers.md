@@ -4,9 +4,9 @@ Tests are sorted into four tiers.
 Each tier has a wall-clock budget and one gate it runs at, and a test's tier is decided by its measured cost and by what its expected value traces to.
 
 Tier 0 is unit tests.
-They run on every build with a 2s budget, and they cover self-contained logic that has no externally observable seam: path normalization and traversal rejection, control-protocol framing, capture-exclusion matching and tombstone resolution rules.
+They run on every build with a 2s budget, and they cover self-contained logic that has no externally observable seam: path normalization, control-protocol framing, capture exclusions, backend selection, and persisted storage identifiers.
 This is an explicit amendment to the principle stated at the top of `tests/CMakeLists.txt`, that tests observe behavior only through the external seam.
-Engine behavior stays at the `tribios fs` seam.
+Workspace behavior stays at the CLI and native Workspace-path seam.
 Only pure logic goes in tier 0.
 
 Tier 1 is forced-invariant end-to-end tests.

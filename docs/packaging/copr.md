@@ -23,7 +23,7 @@ There is no system service unit, no `/etc` file, and no post-install configurati
 The daemon is per-project and the user starts it with `tribios daemon start`.
 Nothing in the package reads or writes `.tribios`, so an upgrade or an erase cannot touch project data.
 
-Runtime dependencies are `fuse3`, because the daemon mounts through libfuse3 and unmounts by running `fusermount3`, and `git-core`, because a Workspace is a Git worktree driven by the `git` command line.
+Runtime dependencies are `btrfs-progs`, for Btrfs subvolume operations, and `git-core`, because each Workspace is a Git linked worktree.
 
 ## Chroots
 
@@ -33,7 +33,7 @@ Claim only what is actually built and tested.
 - `epel-10`, whose GCC 14 compiles C++23 as it stands.
 - `epel-9` only if its build passes.
   RHEL 9's system GCC is 11 and has no `<expected>`, so the spec switches to `gcc-toolset-14-gcc-c++` there, and `cmake` must be 3.24 or newer, which means RHEL 9.4 or later.
-  `fuse-devel` on EPEL 9 comes from CRB, so the chroot needs CRB enabled.
+  EPEL 9 uses `gcc-toolset-14` because the system compiler lacks C++23 `std::expected`.
   Drop the chroot rather than weakening the code if any of that fails.
 
 Rocky Linux and AlmaLinux are claimed only where the EPEL build is genuinely tested on them.
