@@ -33,8 +33,8 @@ jobs:
             pkg-config \
             sqlite3 \
             libsqlite3-dev \
-            libfuse-dev \
-            fuse \
+            libfuse3-dev \
+            fuse3 \
             g++-13
 
       # C++23 std::expected needs GCC 12 or newer. The image default is not

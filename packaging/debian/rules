@@ -2,6 +2,8 @@
 # The package build is a plain CMake build of the upstream install rules; the
 # staged layout is docs/release-and-install-contract.md, not a Debian-only one.
 
+include /usr/share/dpkg/architecture.mk
+
 %:
 	dh $@ --buildsystem=cmake
 
@@ -9,6 +11,12 @@
 # network, and the tier ladder has already run in CI on the tagged tree, so the
 # package build configures the tests off and does not run them.
 override_dh_auto_configure:
-	dh_auto_configure -- -DTRIBIOS_BUILD_TESTS=OFF -DTRIBIOS_ENABLE_FUSE=ON
+	dh_auto_configure -- -DTRIBIOS_BUILD_TESTS=OFF -DTRIBIOS_ENABLE_FUSE=ON \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
+# Configure only warns when libfuse3 is missing and falls back to a stub with no
+# mount support, so a package that had silently lost mounting would still build,
+# still install and still pass the install test, which runs with --no-mount.
+# Fail the build here instead. packaging/rpm/tribios-vfs.spec guards the same way.
 override_dh_auto_test:
+	grep -q TRIBIOS_HAVE_FUSE obj-$(DEB_HOST_GNU_TYPE)/compile_commands.json

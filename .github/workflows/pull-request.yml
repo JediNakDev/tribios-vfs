@@ -17,11 +17,22 @@ concurrency:
 
 jobs:
   strict-mounted-tests-on-linux:
-    name: Strict mounted tests on Linux
-    runs-on: ubuntu-latest
+    name: Strict mounted tests on Linux (${{ matrix.arch }}, ${{ matrix.backing }})
+    runs-on: ${{ matrix.runner }}
 
-    # GitHub-hosted ubuntu runners expose /dev/fuse and libfuse 2.x is an
-    # ordinary package, so every mounted-path test really mounts here.
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+        backing: [ext4, xfs]
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    # GitHub-hosted Ubuntu runners expose /dev/fuse and libfuse3 is an ordinary
+    # package, so every mounted-path test really mounts here.
     # TRIBIOS_REQUIRE_MOUNT=1 turns any skip into a failure.
     env:
       TRIBIOS_REQUIRE_MOUNT: '1'
@@ -39,9 +50,24 @@ jobs:
             pkg-config \
             sqlite3 \
             libsqlite3-dev \
-            libfuse-dev \
-            fuse \
+            libfuse3-dev \
+            fuse3 \
+            e2fsprogs \
+            xfsprogs \
             g++-13
+
+      - name: Create the ${{ matrix.backing }} backing filesystem
+        run: |
+          truncate -s 4G "$RUNNER_TEMP/tribios-backing.img"
+          if [ "${{ matrix.backing }}" = ext4 ]; then
+            sudo mkfs.ext4 -F "$RUNNER_TEMP/tribios-backing.img"
+          else
+            sudo mkfs.xfs -f "$RUNNER_TEMP/tribios-backing.img"
+          fi
+          sudo mkdir /mnt/tribios-backing
+          sudo mount -o loop "$RUNNER_TEMP/tribios-backing.img" /mnt/tribios-backing
+          sudo chown "$USER" /mnt/tribios-backing
+          echo "TMPDIR=/mnt/tribios-backing" >> "$GITHUB_ENV"
 
       - name: Configure the build
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-13
@@ -56,6 +82,8 @@ jobs:
         run: |
           test -e /dev/fuse
           grep -q TRIBIOS_HAVE_FUSE build/compile_commands.json
+          grep -q TRIBIOS_FUSE_API_VERSION=31 build/compile_commands.json
+          test "$(findmnt -no FSTYPE "$TMPDIR")" = "${{ matrix.backing }}"
 
       - name: Run unit tests
         run: ctest --test-dir build -L unit --output-on-failure --no-tests=error

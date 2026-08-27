@@ -108,8 +108,8 @@ CMake explicitly describes `DESTDIR` as the mechanism commonly used by packagers
 This blocks responsible publication and official review because Homebrew requires a compatible open-source license, Debian NEW reviews copyright and DFSG status, Fedora requires an allowed and declared license, and Arch packaging records the source license. [Homebrew acceptable formulae](https://docs.brew.sh/Acceptable-Formulae) [Debian mentors process](https://mentors.debian.net/intro-maintainers/) [Fedora packaging guidelines](https://docs.fedoraproject.org/en-US/packaging-guidelines/) [PKGBUILD manual](https://man.archlinux.org/man/PKGBUILD.5.en)
 - The GitHub repository has no [release tags](https://github.com/JediNakDev/tribios-vfs/tags) or [releases](https://github.com/JediNakDev/tribios-vfs/releases).
 Homebrew core expressly requires an immutable release, and reproducible recipes in every ecosystem benefit from a fixed source archive and checksum. [Homebrew acceptable formulae](https://docs.brew.sh/Acceptable-Formulae) [Semantic Versioning 2.0.0](https://semver.org/)
-- [Issue #3](https://github.com/JediNakDev/tribios-vfs/issues/3), which defines production Linux support through libfuse3, remains open and explicitly blocks v1.0.0.
-The prototype currently targets the FUSE 2 API and does not support FUSE 3. [prototype documentation](../prototype/README.md)
+- [Issue #3](https://github.com/JediNakDev/tribios-vfs/issues/3) defines production Linux support through libfuse3 and explicitly blocks v1.0.0 until that support is verified.
+The Linux adapter now targets libfuse3 while macOS keeps the API supplied by macFUSE. [platform decision](../adr/0003-prototype-runs-on-macos-and-linux.md)
 
 Before the first preview, the upstream install contract should install only `tribios`, `tribios_daemon`, documentation, and required support files.
 It should not expose the internal C++ headers or static libraries as an SDK, auto-configure a Project, delete `.tribios` data during upgrade or uninstall, or invent a machine-global service contract.

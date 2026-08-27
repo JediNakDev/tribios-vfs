@@ -8,11 +8,11 @@ The command surface, the on-disk metadata format and the mounted filesystem sema
 
 A suite is listed here only when the release workflow builds it, installs it in a clean container of that exact image, and runs the core workflow against the installed CLI.
 
-| Suite | Distribution | Image | Architecture |
+| Suite | Distribution | Image | Architectures |
 | --- | --- | --- | --- |
-| `bookworm` | Debian 12 | `debian:bookworm` | `amd64` |
-| `trixie` | Debian 13 | `debian:trixie` | `amd64` |
-| `noble` | Ubuntu 24.04 LTS | `ubuntu:24.04` | `amd64` |
+| `bookworm` | Debian 12 | `debian:bookworm` | `amd64`, `arm64` |
+| `trixie` | Debian 13 | `debian:trixie` | `amd64`, `arm64` |
+| `noble` | Ubuntu 24.04 LTS | `ubuntu:24.04` | `amd64`, `arm64` |
 
 `packaging/apt/suites.txt` is the machine-readable copy of this table, and `tests/e2e/debian_packaging.sh` fails if the two disagree.
 
@@ -20,7 +20,7 @@ A suite is listed here only when the release workflow builds it, installs it in 
 
 Everything else is untested, including Ubuntu 22.04 and every APT-based derivative: Linux Mint, Pop!\_OS, Kali Linux, Raspberry Pi OS, and the rest.
 Sharing a package manager with Debian is not compatibility.
-Each derivative needs its own install and workflow run before it can be listed above, and `arm64` needs its own build before it can be claimed.
+Each derivative needs its own install and workflow run before it can be listed above.
 
 Ubuntu 22.04 jammy is excluded for a concrete reason: it ships CMake 3.22, and Tribios requires 3.24 or newer.
 
@@ -33,7 +33,7 @@ curl -fsSL https://jedinakdev.github.io/tribios-vfs/apt/tribios-vfs.asc |
   sudo tee /etc/apt/keyrings/tribios-vfs.asc > /dev/null
 
 # Replace bookworm with your suite from the table above.
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/tribios-vfs.asc] https://jedinakdev.github.io/tribios-vfs/apt bookworm main" |
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/tribios-vfs.asc] https://jedinakdev.github.io/tribios-vfs/apt bookworm main" |
   sudo tee /etc/apt/sources.list.d/tribios-vfs.list > /dev/null
 
 sudo apt-get update
@@ -47,7 +47,7 @@ It is deliberately not installed into `trusted.gpg.d`, where it would authorise 
 ## Mounting
 
 `tribios daemon start` mounts a Workspace through FUSE, so the user needs access to `/dev/fuse`.
-The package depends on `fuse`, which provides `fusermount`.
+The package depends on `fuse3`, which provides `fusermount3`.
 In a container, pass `--device /dev/fuse --cap-add SYS_ADMIN`, or run the daemon with `--no-mount` and drive the Workspace through `tribios fs`.
 
 ## Upgrade and removal
@@ -68,5 +68,5 @@ An upstream prerelease uses Debian's `~` ordering, so `0.2.0~beta.1-1` sorts bef
 ## What publishes this
 
 `.github/workflows/apt-preview.yml` runs on a release tag.
-It builds one `.deb` per suite inside that suite's own container, verifies each in a clean container of the same image, regenerates the signed indexes with `apt-ftparchive`, pushes the result to the `gh-pages` branch, and finally installs from the live repository on every suite.
+It builds one `.deb` per suite and architecture inside that suite's own container, on a runner native to that architecture, verifies each in a clean container of the same image, regenerates the signed indexes with `apt-ftparchive`, pushes the result to the `gh-pages` branch, and finally installs from the live repository on every suite.
 The scripts it calls are in `packaging/apt/`, and the packaging sources are in `packaging/debian/`.

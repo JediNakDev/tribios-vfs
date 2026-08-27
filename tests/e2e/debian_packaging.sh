@@ -33,7 +33,7 @@ done
 # --- the control file declares what a package needs to be installable --------
 
 control="$(cat "$ROOT/packaging/debian/control")"
-for field in "Source: tribios-vfs" "Package: tribios-vfs" "Architecture: amd64" \
+for field in "Source: tribios-vfs" "Package: tribios-vfs" "Architecture: any" \
              "Standards-Version:" "Maintainer:" "Homepage:"; do
   assert_contains "$field" "$control"
 done
@@ -41,12 +41,20 @@ done
 # is what keeps one suite's package from claiming another suite's libraries.
 assert_contains '${shlibs:Depends}' "$control"
 assert_contains '${misc:Depends}' "$control"
-assert_contains "libfuse-dev" "$control"
+# libfuse3, not libfuse: CMakeLists.txt only looks for the fuse3 pkg-config
+# module on Linux, and building against FUSE 2 silently produces the no-mount
+# stub instead of failing.
+assert_contains "libfuse3-dev" "$control"
+assert_contains "fuse3, git" "$control"
 assert_contains "libsqlite3-dev" "$control"
 assert_contains "cmake (>= 3.24)" "$control"
 
 # The package build must not reach the network for Catch2 or run the tier ladder.
-assert_contains "TRIBIOS_BUILD_TESTS=OFF" "$(cat "$ROOT/packaging/debian/rules")"
+rules="$(cat "$ROOT/packaging/debian/rules")"
+assert_contains "TRIBIOS_BUILD_TESTS=OFF" "$rules"
+# A build that lost mount support must fail rather than ship a stub, which the
+# install test cannot catch because it runs the daemon with --no-mount.
+assert_contains "TRIBIOS_HAVE_FUSE" "$rules"
 grep -q "TRIBIOS_BUILD_TESTS" "$ROOT/CMakeLists.txt" ||
   fail "CMakeLists.txt has no TRIBIOS_BUILD_TESTS option for packagers to turn off"
 
@@ -58,6 +66,17 @@ suites="$(grep -v '^[[:space:]]*#' "$SUITES" | grep -v '^[[:space:]]*$' | awk '{
 for suite in $suites; do
   grep -q "| \`$suite\` |" "$DOC" || fail "suite $suite is built but not in the documented matrix"
 done
+
+# Every architecture a suite is built for has to be claimed on that suite's row,
+# so an unbuilt architecture can never be advertised and a built one is never
+# left undocumented.
+while read -r suite _image architecture; do
+  row="$(grep "| \`$suite\` |" "$DOC")"
+  case "$row" in
+    *"\`$architecture\`"*) ;;
+    *) fail "suite $suite is built for $architecture but the row does not claim it" ;;
+  esac
+done < <(grep -v '^[[:space:]]*#' "$SUITES" | grep -v '^[[:space:]]*$')
 
 documented="$(sed -n 's/^| `\([a-z0-9.]*\)` | .* |$/\1/p' "$DOC")"
 for suite in $documented; do

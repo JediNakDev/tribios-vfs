@@ -14,7 +14,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential debhelper devscripts dpkg-dev \
-  cmake pkg-config libsqlite3-dev libfuse-dev git ca-certificates
+  cmake pkg-config libsqlite3-dev libfuse3-dev fuse3 git ca-certificates
 
 upstream="$(sed -n 's/^project(tribios_vfs VERSION \([^ )]*\).*/\1/p' "$source_root/CMakeLists.txt")"
 version="$("$source_root/packaging/apt/deb_version.sh" "$suite" "$source_root")"

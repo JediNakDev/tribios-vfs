@@ -5,8 +5,14 @@
 # Columns: suite  container image  architecture
 #
 # A suite qualifies only when it ships CMake 3.24 or newer, a C++23 compiler
-# with <expected>, and the FUSE 2.x development library. Ubuntu 22.04 jammy is
-# excluded because its CMake is 3.22.
+# with <expected>, and libfuse3. Ubuntu 22.04 jammy is excluded because its
+# CMake is 3.22.
+#
+# Both release architectures are built for every suite, because the contract
+# claims x86-64 and arm64 Linux and an unbuilt architecture is an unmet claim.
 bookworm  debian:bookworm  amd64
+bookworm  debian:bookworm  arm64
 trixie    debian:trixie    amd64
+trixie    debian:trixie    arm64
 noble     ubuntu:24.04     amd64
+noble     ubuntu:24.04     arm64

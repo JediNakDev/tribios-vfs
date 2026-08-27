@@ -49,9 +49,11 @@ jobs:
           echo "suites=[$suites]" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.suite }}
+    name: Build ${{ matrix.suite }} ${{ matrix.arch }}
     needs: suite-matrix
-    runs-on: ubuntu-latest
+    # Native runners rather than qemu: an emulated C++ build is slow enough to
+    # dominate the whole workflow.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -75,14 +77,14 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: deb-${{ matrix.suite }}
+          name: deb-${{ matrix.suite }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/out/${{ matrix.suite }}/*.deb
           if-no-files-found: error
 
   verify:
-    name: Install ${{ matrix.suite }} in a clean container
+    name: Install ${{ matrix.suite }} ${{ matrix.arch }} in a clean container
     needs: [suite-matrix, build]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +96,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: deb-${{ matrix.suite }}
+          name: deb-${{ matrix.suite }}-${{ matrix.arch }}
           path: incoming
 
       # An upgrade needs a real previous preview. There is none before the first
@@ -138,13 +140,14 @@ jobs:
           pattern: deb-*
           path: incoming
 
-      # download-artifact names each directory deb-<suite>; the repository
-      # script expects one directory per suite.
+      # download-artifact names each directory deb-<suite>-<arch>; the repository
+      # script expects one directory per suite holding every architecture of it.
       - name: Lay the incoming packages out by suite
         run: |
-          mkdir -p by-suite
           for directory in incoming/deb-*; do
-            mv "$directory" "by-suite/$(basename "$directory" | sed 's/^deb-//')"
+            suite="$(basename "$directory" | sed 's/^deb-//; s/-[^-]*$//')"
+            mkdir -p "by-suite/$suite"
+            mv "$directory"/*.deb "by-suite/$suite/"
           done
 
       - name: Import the repository signing key
@@ -176,9 +179,9 @@ jobs:
           git push
 
   verify-from-repository:
-    name: apt-get install on ${{ matrix.suite }}
+    name: apt-get install on ${{ matrix.suite }} ${{ matrix.arch }}
     needs: [suite-matrix, publish]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:

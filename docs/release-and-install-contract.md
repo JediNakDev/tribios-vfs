@@ -3,6 +3,7 @@
 This is the upstream contract every packaging recipe depends on.
 The Homebrew tap, the Debian source package, the Copr spec, and the AUR `PKGBUILD` all build from the same release archive and install through the same CMake rules described here.
 `docs/adr/0006-install-only-the-public-artifacts.md` records why the layout is what it is.
+`docs/packaging/copr.md` records how the Fedora and EPEL preview repository builds against it.
 
 Everything on this page is a compatibility surface.
 Changing it is a versioned change, not a refactor.
@@ -50,9 +51,15 @@ Tribios publishes no C++ SDK and no CMake package config.
 `tribios` locates `tribios_daemon` relative to the running executable, so an installed tree can be relocated after staging.
 Setting `TRIBIOS_DAEMON` overrides the lookup.
 
-The build requires CMake 3.24 or newer, a C++23 compiler, `pkg-config`, SQLite 3, and the FUSE 2.x API: `libfuse-dev` on Linux, the macFUSE cask on macOS.
-Configuring with `-DTRIBIOS_ENABLE_FUSE=OFF`, or building where no FUSE 2.x library is found, produces a working binary without mount support.
-FUSE 3 is detected and reported but not used.
+The build requires CMake 3.24 or newer, a C++23 compiler, `pkg-config`, and SQLite 3.
+Mounted builds use `libfuse3-dev` and `fuse3` on Linux, or the macFUSE cask on macOS.
+Configuring with `-DTRIBIOS_BUILD_TESTS=OFF` skips the test suite, and with it the Catch2 fetch that would otherwise need network access at configure time.
+Packaging recipes building in an isolated chroot use it; `packaging/aur/README.md` is the worked example.
+A downstream recipe may add its distribution's own conventional files beside the four above, such as the Arch `usr/share/licenses/tribios-vfs/LICENSE` copy.
+
+Configuring with `-DTRIBIOS_ENABLE_FUSE=OFF`, or building where the platform backend is not found, produces a working binary without mount support.
+Linux builds select libfuse3 API 31.
+macOS builds select the API 26 interface supplied by macFUSE.
 
 ## Command surface
 
@@ -111,6 +118,14 @@ A mounted Workspace is a copy-on-write view: reads fall through to the Base stat
 Deletions are recorded as tombstones rather than by touching the Base state.
 The Base state and sibling Workspaces are never modified by activity in one Workspace.
 `docs/adr/0002-prototype-whole-file-copy-on-write-workspaces.md` and `docs/adr/0005-journal-crash-consistent-workspace-mutations.md` hold the details, including which operations are unsupported.
+
+Linux release builds support x86-64 and arm64 with ext4 or XFS backing storage.
+Linux path lookup is case-sensitive on those filesystems.
+Tribios reports timestamps with one-second precision on both platforms even when the host stores finer values.
+Renames are atomic within one Workspace and fail with `EXDEV` across Workspaces.
+The kernel enforces the reported permission bits, every mounted entry belongs to the invoking user, and changing ownership to another user is unsupported.
+Mounts do not enable `allow_other`, so Linux keeps the mounted view private to the invoking user by default.
+The metadata format and recovery protocol are shared between macOS and Linux.
 
 ## Migration contract
 

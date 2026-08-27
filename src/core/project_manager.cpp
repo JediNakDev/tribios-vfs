@@ -1,5 +1,6 @@
 #include "core/project_manager.hpp"
 
+#include <cerrno>
 #include <cctype>
 #include <cstdint>
 #include <fcntl.h>
@@ -44,6 +45,36 @@ OutcomeVoid write_file_durably(const std::filesystem::path& path, std::string_vi
   if (sync_file_data(path) != 0) return error("cannot flush " + path.string());
   if (sync_parent_directory(path) != 0) {
     return error("cannot flush directory " + path.parent_path().string());
+  }
+  return {};
+}
+
+OutcomeVoid verify_durable_backing_layout(const ProjectPaths& paths) {
+  const std::filesystem::path staged_probe = paths.staging_dir / ".backing-layout-probe";
+  const std::filesystem::path published_probe = paths.workspaces_dir / ".backing-layout-probe";
+  auto remove_probes = [&] {
+    std::error_code ignored;
+    std::filesystem::remove(staged_probe, ignored);
+    std::filesystem::remove(published_probe, ignored);
+  };
+
+  if (auto written = write_file_durably(staged_probe, "tribios"); !written) {
+    remove_probes();
+    return error("backing storage does not provide durable staged writes: " + written.error());
+  }
+  if (::rename(staged_probe.c_str(), published_probe.c_str()) != 0) {
+    const std::string reason = std::generic_category().message(errno);
+    remove_probes();
+    return error("backing storage cannot atomically publish staged Workspace data: " + reason);
+  }
+  if (sync_directory(paths.staging_dir) != 0 || sync_directory(paths.workspaces_dir) != 0) {
+    remove_probes();
+    return error("backing storage cannot durably flush a published Workspace entry");
+  }
+
+  remove_probes();
+  if (sync_directory(paths.workspaces_dir) != 0) {
+    return error("backing storage cannot durably remove a published Workspace entry");
   }
   return {};
 }
@@ -118,9 +149,13 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
     return error("project is already configured; the Base state is captured once");
   }
   if (force) std::filesystem::remove_all(paths.tribios_dir, ec);
-  for (const auto& dir : {paths.tribios_dir, paths.workspaces_dir, paths.mount_point}) {
+  for (const auto& dir :
+       {paths.tribios_dir, paths.workspaces_dir, paths.staging_dir, paths.mount_point}) {
     std::filesystem::create_directories(dir, ec);
     if (ec) return error("cannot create " + dir.string() + ": " + ec.message());
+  }
+  if (auto durable = verify_durable_backing_layout(paths); !durable) {
+    return std::unexpected(durable.error());
   }
 
   auto captured = capture_base_state(paths.root, paths.base_dir);

@@ -74,24 +74,26 @@ bench/       fixture generator and benchmark harness
 
 ## Platforms
 
-The adapter speaks the FUSE 2.x API, so the prototype builds, mounts and runs
-its full test suite on both:
+The adapter builds against the native high-level FUSE interface on each host and
+runs the same mounted test suite on both:
 
 | | Backend | Install |
 | --- | --- | --- |
 | macOS | macFUSE | `brew install --cask macfuse` |
-| Linux | libfuse 2.x | `apt-get install libfuse-dev` |
+| Linux | libfuse3 | `apt-get install libfuse3-dev fuse3` |
 
-Three things differ, each behind an `__APPLE__` guard: the extended-attribute
-callbacks take an extra offset on macFUSE, `volname` and `noappledouble` are
-macFUSE-only mount options, and Linux unmounts through `fusermount -u`.
+The callback signatures differ where libfuse3 added request fields.
+The adapter translates those fields without moving policy out of the Workspace
+engine.
+The macFUSE-only options are `volname`, `noappledouble`, and `use_ino`.
+Linux enables inode reporting through the libfuse3 initialization callback and
+unmounts through `fusermount3 -u`.
 
 macOS with macFUSE is the platform whose measurements decide issue #1; Linux
 numbers are reported separately and never substituted for it. See
-`docs/adr/0003-prototype-runs-on-macos-and-linux.md`, which reopens the issue's
-out-of-scope list. FUSE 3 is not supported: libfuse 3 does not offer the FUSE 2
-API. The macFUSE FSKit backend is deliberately unused, since its current feature
-and performance differences would confound the verdict.
+`docs/adr/0003-prototype-runs-on-macos-and-linux.md`.
+The macFUSE FSKit backend is deliberately unused, since its current feature and
+performance differences would confound the verdict.
 
 ## Running on macOS
 
@@ -224,12 +226,11 @@ Only a report with `state: complete` may decide issue #1.
   an individual mutating operation. That work is specified in issue #2.
 - Renaming a Base-state directory materializes that subtree into the Workspace.
 - A removed Workspace stops answering immediately, but the kernel may keep its
-  cached directory entry until the mount's entry timeout expires. FUSE 2.x has
-  no working cache-invalidation call for the high-level API.
+  cached directory entry until the mount's entry timeout expires.
 - A Workspace keeps its branch when it is removed, so re-using the name later
   needs the branch dealt with first.
-- No Windows, FSKit, FUSE 3, chunk-level deduplication, content addressing,
-  compression or garbage collection.
+- No Windows, FSKit, chunk-level deduplication, content addressing, compression
+  or garbage collection.
 
 ## Terminology gap
 

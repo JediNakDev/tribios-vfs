@@ -1,79 +1,123 @@
-# Publishing a release
+# Publication steps
 
-Tagging is not publishing.
-A tag publishes the source archive and the APT repository on its own.
-Everything else waits for a person.
+Three of the four channels publish themselves when you push a `v*` tag.
+Copr does not, and never will, because Copr builds run in Fedora's infrastructure against an account no workflow holds a token for.
 
-Read this before you tag, not after.
+Read this before tagging, not after.
+A tag is immutable, so anything wrong in the tagged tree costs a new version number.
 
-## What a tag does by itself
+| Channel | On a `v*` tag | Needs a human |
+| --- | --- | --- |
+| Homebrew | `update-homebrew-tap` pushes the formula to the tap | no, once the deploy key is set |
+| APT | `apt-preview.yml` builds, verifies and republishes the repository | no, once the signing key is set |
+| AUR | `update-aur-package` pushes `PKGBUILD` and `.SRCINFO` | no, once the SSH key is set |
+| Copr | nothing happens | yes, every release |
 
-Pushing a `v*` tag starts two workflows, and nothing else in this repository reacts to a tag.
+## Before you tag
 
-`.github/workflows/release.yml` refuses the tag if its version disagrees with `CMakeLists.txt`, then builds `tribios-vfs-<version>.tar.gz` with `git archive` and publishes it, plus its SHA-256, as a prerelease.
-Every other channel builds from that archive, so it has to land first.
+Check the version first.
+`CMakeLists.txt` and `packaging/rpm/tribios-vfs.spec` both carry it, the design tier fails if they disagree, and the release workflow refuses a tag that does not match `CMakeLists.txt`.
 
-`.github/workflows/apt-preview.yml` builds one `.deb` per suite in `packaging/apt/suites.txt`, installs each one in a clean container of the same image, regenerates the signed repository, pushes it to `gh-pages`, and finishes by installing from the live repository the way a user would.
-When the last job is green, `apt-get install tribios-vfs` works on every listed suite.
-If it is red, nothing was published: the verification runs before the push.
-
-The APT channel needs the signing key, the two repository secrets, the `gh-pages` branch and Pages, all of which are already set up.
-`packaging/apt/setup-preview-channel.sh` is how they were created, if a fork or a key rotation ever needs them again.
-
-## What you do afterwards
-
-### Watch the two workflows
+Then confirm the secrets exist, because a missing one turns a release run red halfway through:
 
 ```sh
-gh run list -L5
-gh run watch "$(gh run list -w apt-preview.yml -L1 --json databaseId -q '.[0].databaseId')"
+gh secret list
 ```
 
-The APT run takes a while because it builds and verifies each suite in its own container.
-Let it finish before touching the other channels.
-A failure there usually means the packaging is wrong for one suite, and the same mistake is likely waiting in the others.
+`HOMEBREW_TAP_DEPLOY_KEY`, `APT_SIGNING_KEY` and `APT_SIGNING_KEY_ID` are set.
+`AUR_SSH_PRIVATE_KEY` is not, so the AUR job fails today.
+The archive still publishes when a downstream job fails, so a red run is recoverable by fixing the secret and re-running that job alone.
 
-### Copr, for Fedora and EPEL
+Tag from `main` once the packaging branches you want in this release are merged:
 
-Copr does not follow tags.
-The wizard and the spec arrive with issue #18, so this step only exists once that branch is on `main`.
+```sh
+git tag -a v0.0.1 -m v0.0.1
+git push origin v0.0.1
+```
+
+## Homebrew
+
+Automatic.
+`update-homebrew-tap` regenerates the formula against the published archive and its checksum, then pushes the whole of `packaging/homebrew/tap` to `JediNakDev/homebrew-tap`.
+
+Nothing is left to do afterwards except confirm it worked:
+
+```sh
+brew tap JediNakDev/tap
+brew install tribios-vfs
+tribios version
+```
+
+The tap repository is generated wholesale on every release.
+Editing it by hand is pointless; the next tag overwrites it.
+
+## APT
+
+Automatic, and the longest of the four.
+`apt-preview.yml` builds one `.deb` per suite in `packaging/apt/suites.txt`, installs each one in a clean container, signs the repository with `APT_SIGNING_KEY`, and republishes it on the `gh-pages` branch, which GitHub Pages already serves from `https://jedinakdev.github.io/tribios-vfs/`.
+
+Verification runs before the push, so a red run published nothing rather than something broken.
+Each `.deb` is installed in a clean container of its own suite image, and the final job installs from the live repository the way a user does.
+
+`packaging/apt/setup-preview-channel.sh` is how the signing key, the two secrets, the `gh-pages` branch and Pages were created.
+It is untracked, like the Copr and tap setup scripts, and is only needed again for a fork or a key rotation.
+
+Afterwards, check the repository the workflow published rather than the workflow's own green tick, since the two can disagree if a publish step races:
+
+```sh
+curl -fsS https://jedinakdev.github.io/tribios-vfs/apt/dists/bookworm/Release | head
+```
+
+## Copr
+
+Manual, every time.
+
+Copr clones this repository, so the spec is not frozen by the tag the way the tarball is.
+A broken spec is fixable without cutting a new version: push the fix to `main` and point the Copr package at the newer commit.
+`Source0` still fetches the tagged archive.
+
+Run the wizard, which walks the account, the project, the chroots, the build and the per-chroot container acceptance, and prints the values worth recording at the end:
 
 ```sh
 ./packaging/publish-copr-preview.sh
 ```
 
-The wizard verifies the published archive against its checksum, creates or reuses the project, points the package at the tag, builds, runs the container acceptance for every chroot matching your architecture, and prints the project URL, repository slug and build ID.
-`docs/packaging/copr.md` has the manual equivalent and the reasoning behind the chroot list.
+It refuses to start until the release exists, and it never tags or pushes.
+It is deliberately untracked, like the Homebrew tap setup script, because it is an operator tool rather than part of the package.
 
-### Homebrew and the AUR
+`docs/packaging/copr.md` has the same procedure by hand, plus the chroot list and the reasoning behind it.
 
-Neither is in the repository yet.
-Homebrew is issue #16, the AUR recipe is issue #19, and their steps belong in this file when they land.
-Until then, a release publishes to APT and Copr only, and saying otherwise anywhere public would be a lie a user finds out about at install time.
+Two chroots to watch.
+Fedora still ships `fuse-devel`, so those builds are fine.
+EPEL 10 may not, since RHEL has been moving consumers to fuse3, and EPEL 9 needs `gcc-toolset-14` for C++23.
+Drop a chroot that fails rather than weakening the spec for it.
 
-### Announce nothing until the installs are green
+## AUR
 
-Each channel proves itself by installing in a clean environment.
-Wait for all of them, then update whatever points users at a version.
+Automatic once the key exists, and blocked until it does.
 
-## If something has to be fixed after tagging
+`update-aur-package` runs `update-recipe.sh` inside an Arch container, which rewrites `pkgver`, `pkgrel` and `sha256sums` against the published archive and regenerates `.SRCINFO` with `makepkg`, then pushes both files over SSH.
 
-Do not move the tag.
-Downstream recipes pin the archive checksum, and re-cutting a tag breaks every one of them at once, including copies you cannot see.
+The one-time setup is in `packaging/aur/README.md` and needs an AUR account:
 
-Fix the problem, bump the patch version in `CMakeLists.txt`, and tag again.
-The cost of a wasted version number is nothing.
-The cost of a mutated release is a user whose checksum no longer matches and who has no way to tell a fix from an attack.
+- register an SSH public key on `https://aur.archlinux.org/` under My Account
+- add the private half as the `AUR_SSH_PRIVATE_KEY` Actions secret
+- claim the name `tribios-vfs` with a first push by hand
 
-## Version spelling
+Claiming by hand matters more than it looks.
+The AUR creates a package repository on its first push and makes whoever pushed it the maintainer, so leaving the first push to a workflow makes the key's owner the maintainer of record.
 
-The upstream version is SemVer, `0.2.0-beta.1`.
-Each ecosystem spells a prerelease its own way, because no single spelling sorts correctly everywhere.
+Afterwards:
 
-| Channel | Spelling | Sorts before |
-| --- | --- | --- |
-| Upstream tag | `v0.2.0-beta.1` | |
-| Debian | `0.2.0~beta.1-1~bookworm1` | `0.2.0-1` |
-| RPM | `0.2.0~beta1` | `0.2.0` |
+```sh
+git clone https://aur.archlinux.org/tribios-vfs.git
+grep -E 'pkgver|sha256sums' tribios-vfs/PKGBUILD
+```
 
-Get this wrong in the obvious direction, spelling it `0.2.0-beta1` in RPM, and the beta sorts *after* the release, which strands every tester on the prerelease with no upgrade path.
+## When a release goes wrong
+
+Never re-cut a tag.
+Downstream recipes pin the archive checksum, and moving a tag breaks every one of them at once, silently, at different times.
+
+For a bad spec, PKGBUILD or formula, fix it on `main` and re-run the failed job against the same tag.
+Only a bad tagged tree needs a new version.
