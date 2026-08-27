@@ -18,6 +18,15 @@ std::filesystem::path overlay_private_path(const StorageConfiguration& configura
   return configuration.private_dir / "overlay" / name;
 }
 
+// OverlayFS creates a "work" subdirectory inside the work directory, owned by
+// root with no permissions, and leaves it behind after unmounting. A recursive
+// delete cannot list it, so it has to go first: it is always empty, and
+// removing it needs only write permission on the work directory.
+void remove_overlay_work_directory(const std::filesystem::path& work, std::error_code& ec) {
+  std::filesystem::remove(work / "work", ec);
+  std::filesystem::remove(work, ec);
+}
+
 StorageServiceResult mount_overlay(const StorageConfiguration& configuration,
                                    const std::filesystem::path& upper,
                                    const std::filesystem::path& work,
@@ -35,30 +44,6 @@ StorageServiceResult unmount_overlay(const StorageConfiguration& configuration,
        configuration.workspaces_dir.string(), target.string()});
 }
 
-OutcomeVoid make_tree_immutable(const std::filesystem::path& root) {
-  std::error_code ec;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
-    if (ec) return error("cannot inspect the OverlayFS Base state: " + ec.message());
-    const auto status = entry.symlink_status(ec);
-    if (ec || std::filesystem::is_symlink(status)) continue;
-    const auto permissions = status.permissions();
-    std::filesystem::permissions(entry.path(), permissions & ~std::filesystem::perms::owner_write &
-                                                   ~std::filesystem::perms::group_write &
-                                                   ~std::filesystem::perms::others_write,
-                                 ec);
-    if (ec) return error("cannot make the OverlayFS Base state immutable: " + ec.message());
-  }
-  std::filesystem::permissions(root, std::filesystem::perms::owner_read |
-                                         std::filesystem::perms::owner_exec |
-                                         std::filesystem::perms::group_read |
-                                         std::filesystem::perms::group_exec |
-                                         std::filesystem::perms::others_read |
-                                         std::filesystem::perms::others_exec,
-                               ec);
-  if (ec) return error("cannot make the OverlayFS Base state immutable: " + ec.message());
-  return {};
-}
-
 class OverlayFsStorage final : public WorkspaceStorage {
  public:
   using WorkspaceStorage::WorkspaceStorage;
@@ -68,13 +53,10 @@ class OverlayFsStorage final : public WorkspaceStorage {
   Outcome<BaseStateCapture> capture_base_state(
       const std::filesystem::path& source_root,
       const CaptureProgressReporter& report_progress) override {
-    auto captured =
-        copy_workspace_contents(source_root, configuration_.base_dir, report_progress);
-    if (!captured) return std::unexpected(captured.error());
-    if (auto immutable = make_tree_immutable(configuration_.base_dir); !immutable) {
-      return std::unexpected(immutable.error());
-    }
-    return captured;
+    // OverlayFS never writes to the lower tree, so the Base state stays
+    // read-only by construction. Stripping its write bits would only travel
+    // into every Workspace with the first copy-up and make the copy unwritable.
+    return copy_workspace_contents(source_root, configuration_.base_dir, report_progress);
   }
 
   Outcome<std::string> create_workspace(const std::string& name) override {
@@ -116,6 +98,7 @@ class OverlayFsStorage final : public WorkspaceStorage {
     const auto private_path = locator.empty() ? overlay_private_path(configuration_, name)
                                               : configuration_.tribios_dir / locator;
     std::error_code ec;
+    remove_overlay_work_directory(private_path / "work", ec);
     std::filesystem::remove_all(private_path, ec);
     if (ec) return error("cannot reclaim OverlayFS Workspace storage: " + ec.message());
     return {};
@@ -132,12 +115,15 @@ class OverlayFsStorage final : public WorkspaceStorage {
 
 StorageCapability probe_overlayfs_capability(const StorageConfiguration& configuration) {
   StorageCapability capability{kOverlayFsBackend, false, {}};
-  const auto probe = configuration.private_dir /
-                     ("probe-overlay-" + std::to_string(static_cast<long long>(::getpid())));
+  const std::string probe_name =
+      "probe-overlay-" + std::to_string(static_cast<long long>(::getpid()));
+  const auto probe = configuration.private_dir / probe_name;
   const auto lower = probe / "lower";
   const auto upper = probe / "upper";
   const auto work = probe / "work";
-  const auto target = probe / "target";
+  // The storage service only mounts onto a path below the Workspace directory,
+  // so the probe has to mount where a real Workspace would.
+  const auto target = configuration.workspaces_dir / probe_name;
   std::error_code ec;
   for (const auto& path : {lower, upper, work, target}) {
     std::filesystem::create_directories(path, ec);
@@ -147,6 +133,8 @@ StorageCapability probe_overlayfs_capability(const StorageConfiguration& configu
   const auto mounted = mount_overlay(probe_configuration, upper, work, target);
   const auto unmounted = mounted.ok ? unmount_overlay(probe_configuration, target)
                                     : StorageServiceResult{};
+  std::filesystem::remove(target, ec);
+  remove_overlay_work_directory(work, ec);
   std::filesystem::remove_all(probe, ec);
   if (!mounted.ok) {
     capability.missing_capability =

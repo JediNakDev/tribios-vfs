@@ -158,6 +158,12 @@ Outcome<BaseStateCapture> ProjectManager::configure(const std::filesystem::path&
   store->reset();
   std::filesystem::rename(staged_database, paths.database, ec);
   if (ec) return error("cannot publish Project metadata: " + ec.message());
+  // Closing the store checkpoints the write-ahead log into the staged database,
+  // but the sidecar files can survive the close. They belong to a path that no
+  // longer exists, so leaving them behind is grime in the Project directory.
+  for (const char* suffix : {"-wal", "-shm"}) {
+    std::filesystem::remove(staged_database.string() + suffix, ec);
+  }
   if (sync_directory(paths.tribios_dir) != 0 || sync_parent_directory(paths.tribios_dir) != 0) {
     return error("cannot flush Project metadata directories");
   }

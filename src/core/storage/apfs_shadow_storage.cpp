@@ -17,6 +17,8 @@ namespace {
 
 constexpr std::uint64_t kProbeImageBytes = 64ULL * 1024 * 1024;
 constexpr std::uint64_t kImageSizeAlignmentBytes = 1024 * 1024;
+// hdiutil's "b" size suffix counts 512-byte sectors, not bytes.
+constexpr std::uint64_t kImageSectorBytes = 512;
 
 std::filesystem::path base_image_path(const StorageConfiguration& configuration) {
   return configuration.private_dir / "base.sparseimage";
@@ -37,8 +39,8 @@ OutcomeVoid run_hdiutil(const std::vector<std::string>& arguments, std::string_v
 
 OutcomeVoid create_sparse_apfs_image(const std::filesystem::path& image,
                                      std::uint64_t capacity_bytes) {
-  return run_hdiutil({"create", "-size", std::to_string(capacity_bytes) + "b", "-type",
-                      "SPARSE", "-fs", "Case-sensitive APFS", "-volname", "Tribios Base",
+  return run_hdiutil({"create", "-size", std::to_string(capacity_bytes / kImageSectorBytes) + "b",
+                      "-type", "SPARSE", "-fs", "Case-sensitive APFS", "-volname", "Tribios Base",
                       "-nospotlight", image.string()},
                      "cannot create the APFS Base-state image");
 }

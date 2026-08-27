@@ -178,7 +178,22 @@ OutcomeVoid unregister_linked_worktree(const std::filesystem::path& project_root
        workspace_path.string()});
   if (!removed.ok() && removed.output.find("is not a working tree") == std::string::npos &&
       removed.output.find("is not a working tree directory") == std::string::npos) {
-    return error("git worktree remove failed: " + removed.output);
+    // A detached Workspace is an empty directory whose ".git" file lived in the
+    // Workspace storage, and `git worktree remove` refuses to validate a
+    // working tree it cannot find. Dropping the empty directory and pruning
+    // unregisters it. Every other Workspace is still locked, so prune leaves
+    // them registered.
+    std::error_code detached_ec;
+    if (std::filesystem::exists(workspace_path / kGitDirName, detached_ec)) {
+      return error("git worktree remove failed: " + removed.output);
+    }
+    std::filesystem::remove(workspace_path, detached_ec);
+    if (detached_ec) {
+      return error("cannot remove the detached Workspace path: " + detached_ec.message());
+    }
+    auto pruned = run_process_and_capture_output(
+        {"git", "-C", project_root.string(), "worktree", "prune"});
+    if (!pruned.ok()) return error("git worktree prune failed: " + pruned.output);
   }
   const std::filesystem::path worktrees = project_root / kGitDirName / "worktrees";
   std::error_code ec;

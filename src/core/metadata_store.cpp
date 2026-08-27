@@ -177,14 +177,24 @@ Outcome<std::unique_ptr<MetadataStore>> MetadataStore::open_database(
 Outcome<std::unique_ptr<MetadataStore>> MetadataStore::open_database_read_only(
     const std::filesystem::path& database_path) {
   sqlite3* db = nullptr;
-  const int opened = sqlite3_open_v2(database_path.c_str(), &db,
-                                     SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr);
+  // A WAL database needs a writable "-shm" file, which SQLITE_OPEN_READONLY
+  // cannot create. A cleanly closed store has no "-shm" left on disk, so a
+  // read-only open of a healthy metadata store fails with "unable to open
+  // database file". Open for writing and let SQLite enforce the read-only
+  // contract through query_only instead.
+  const int opened = sqlite3_open_v2(
+      database_path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr);
   if (opened != SQLITE_OK) {
     const std::string message = db == nullptr ? "cannot open database" : sqlite3_errmsg(db);
     sqlite3_close(db);
     return error("metadata store: " + message);
   }
   sqlite3_busy_timeout(db, 5000);
+  if (sqlite3_exec(db, "PRAGMA query_only = 1", nullptr, nullptr, nullptr) != SQLITE_OK) {
+    const std::string message = sqlite3_errmsg(db);
+    sqlite3_close(db);
+    return error("metadata store: " + message);
+  }
   sqlite3_stmt* version = prepare_bound_statement(
       db, "SELECT version FROM metadata_format WHERE id = 1", {});
   if (version == nullptr || sqlite3_step(version) != SQLITE_ROW ||
