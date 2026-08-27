@@ -35,11 +35,20 @@ jobs:
         uses: Homebrew/actions/setup-homebrew@master
 
       - name: Register this checkout as the tap
+        # setup-homebrew registers a repository named homebrew-* as a tap on
+        # its own, so an unconditional tap-new aborts with "Tap is already
+        # installed" and skips every step below it.
         run: |
-          brew tap-new JediNakDev/tap --no-git
           tap_dir="$(brew --repository JediNakDev/tap)"
-          rm -rf "$tap_dir/Formula"
-          cp -R Formula "$tap_dir/Formula"
+          if [ ! -d "$tap_dir" ]; then
+            brew tap-new JediNakDev/tap --no-git
+          fi
+          # When the tap is this very checkout the formulae are already in
+          # place, and copying over them would delete the source first.
+          if [ "$(cd "$tap_dir" && pwd -P)" != "$(pwd -P)" ]; then
+            rm -rf "$tap_dir/Formula"
+            cp -R Formula "$tap_dir/Formula"
+          fi
 
       - name: Audit the formula
         run: brew audit --online JediNakDev/tap/tribios-vfs
