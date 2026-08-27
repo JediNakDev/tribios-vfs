@@ -18,7 +18,6 @@ class ControlServer {
 
   OutcomeVoid serve();  // runs until a shutdown request arrives
   void stop();
-  void remove_socket();
 
  private:
   std::vector<std::string> dispatch_control_request(const std::vector<std::string>& request);

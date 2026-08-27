@@ -43,11 +43,13 @@ int main(int argc, char** argv) {
   glb_control_server = &server;
   std::signal(SIGTERM, stop_daemon_on_signal);
   std::signal(SIGINT, stop_daemon_on_signal);
+  // A client that dies between sending its request and reading the reply must
+  // not take the daemon down with it.
+  std::signal(SIGPIPE, SIG_IGN);
 
   std::cerr << "tribios_daemon: serving " << paths.root << " on " << paths.socket << "\n";
   auto served = server.serve();
   (*manager)->wait_for_reclamation();
-  server.remove_socket();
   if (!served) {
     std::cerr << "tribios_daemon: " << served.error() << "\n";
     return 1;

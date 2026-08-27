@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <charconv>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -363,6 +364,11 @@ int command_install_privileges(const char* argv0) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // The control socket is a stream socket and stdout is often a pipe, so a peer
+  // that closes first, a shutting-down daemon or a `tribios workspace list |
+  // head -1`, would otherwise kill the process with a signal instead of
+  // surfacing EPIPE through the error paths that already handle it.
+  std::signal(SIGPIPE, SIG_IGN);
   const Options options = parse_command_line(argc, argv);
   if (options.positional.empty()) {
     std::cout << kUsage;

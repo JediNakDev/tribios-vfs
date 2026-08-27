@@ -126,6 +126,10 @@ OutcomeVoid ControlServer::serve() {
     (void)ignored;
     ::close(client);
   }
+  // Unlinking before the listening socket closes keeps the path from outliving
+  // the daemon that owns it. `daemon stop` returns as soon as a connect is
+  // refused, so a later unlink could delete a replacement daemon's socket.
+  ::unlink(socket_path_.c_str());
   ::close(listen_fd_);
   listen_fd_ = -1;
   return {};
@@ -135,7 +139,5 @@ void ControlServer::stop() {
   running_.store(false);
   if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
 }
-
-void ControlServer::remove_socket() { ::unlink(socket_path_.c_str()); }
 
 }  // namespace tribios
