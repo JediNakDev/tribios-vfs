@@ -8,7 +8,9 @@
 
 srpm:
 	dnf -y install rpm-build rpmdevtools
-	spectool -g -R -D "_sourcedir $(PWD)" packaging/rpm/tribios-vfs.spec
+	# -d is spectool's --define; -D is --debug, and passing it here silently
+	# swallows the macro as the spec-file argument.
+	spectool -g -R -d "_sourcedir $(PWD)" packaging/rpm/tribios-vfs.spec
 	rpmbuild -bs \
 		-D "_sourcedir $(PWD)" \
 		-D "_srcrpmdir $(outdir)" \
