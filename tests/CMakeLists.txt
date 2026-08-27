@@ -11,6 +11,7 @@ set(TRIBIOS_INVARIANT_TESTS
   deletion_persistence
   restart_persistence
   native_lifecycle_recovery
+  concurrent_workspaces
 )
 
 # Tier 2: designed decisions traceable to an ADR or a documented deliberate limit.
