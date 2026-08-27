@@ -5,9 +5,17 @@
 
 set -Eeuo pipefail
 
+# A CLI call goes through the one-line tribios() wrapper, so reporting only the
+# immediate caller names the wrapper and never the test line that failed. The
+# whole call stack is what makes an intermittent failure diagnosable.
 report_unexpected_command_failure() {
   local status="$?"
-  echo "FAIL: ${BASH_SOURCE[1]}:${BASH_LINENO[0]}: [$BASH_COMMAND] exited $status" >&2
+  echo "FAIL: [$BASH_COMMAND] exited $status" >&2
+  local frame=0 location
+  while location="$(caller "$frame")"; do
+    echo "  at $location" >&2
+    frame=$((frame + 1))
+  done
   exit "$status"
 }
 trap report_unexpected_command_failure ERR
