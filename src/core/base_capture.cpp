@@ -1,5 +1,6 @@
 #include "core/base_capture.hpp"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #include <chrono>
@@ -18,6 +19,18 @@ const char* const kSecretsWarning =
     "warning: is a correctness boundary, not a security boundary";
 
 namespace {
+
+// Git's index caches each file's mtime and size. Carrying the Project's
+// modification times into the Base state lets a Workspace reuse that cached
+// data instead of re-hashing every tracked file on its first `git status`.
+void copy_modification_time(const struct stat& source, const std::filesystem::path& target) {
+#if defined(__APPLE__)
+  struct timespec times[2] = {source.st_atimespec, source.st_mtimespec};
+#else
+  struct timespec times[2] = {source.st_atim, source.st_mtim};
+#endif
+  ::utimensat(AT_FDCWD, target.c_str(), times, AT_SYMLINK_NOFOLLOW);
+}
 
 OutcomeVoid copy_directory(const std::filesystem::path& source_root,
                            const std::filesystem::path& base_root, const std::string& relative,
@@ -42,6 +55,7 @@ OutcomeVoid copy_directory(const std::filesystem::path& source_root,
     if (S_ISLNK(st.st_mode)) {
       std::filesystem::create_symlink(std::filesystem::read_symlink(entry.path(), ec), target, ec);
       if (ec) return error("base capture: cannot recreate symlink " + child);
+      copy_modification_time(st, target);
     } else if (S_ISDIR(st.st_mode)) {
       std::filesystem::create_directories(target, ec);
       if (ec) return error("base capture: cannot create " + target.string());
@@ -49,11 +63,13 @@ OutcomeVoid copy_directory(const std::filesystem::path& source_root,
       auto copied =
           copy_directory(source_root, base_root, child, project_device, report_progress, stats);
       if (!copied) return copied;
+      copy_modification_time(st, target);  // after the children, which bump it
     } else if (S_ISREG(st.st_mode)) {
       std::filesystem::copy_file(entry.path(), target,
                                  std::filesystem::copy_options::overwrite_existing, ec);
       if (ec) return error("base capture: cannot copy " + child + ": " + ec.message());
       ::chmod(target.c_str(), st.st_mode & 07777);
+      copy_modification_time(st, target);
       stats.bytes += st.st_size;
     } else {
       continue;  // special file

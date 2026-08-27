@@ -12,6 +12,7 @@ set(TRIBIOS_INVARIANT_TESTS
   restart_persistence
   native_lifecycle_recovery
   concurrent_workspaces
+  git_state_durability
 )
 
 # Tier 2: designed decisions traceable to an ADR or a documented deliberate limit.
