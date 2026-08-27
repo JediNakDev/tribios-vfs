@@ -4,6 +4,5 @@ bench/results/
 compile_commands.json
 .tribios/
 __pycache__/
-
-# Wizard output: local credentials and release records, never committed.
+.apt-preview.env
 .env

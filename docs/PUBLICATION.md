@@ -56,9 +56,11 @@ Editing it by hand is pointless; the next tag overwrites it.
 Automatic, and the longest of the four.
 `apt-preview.yml` builds one `.deb` per suite in `packaging/apt/suites.txt`, installs each one in a clean container, signs the repository with `APT_SIGNING_KEY`, and republishes it on the `gh-pages` branch, which GitHub Pages already serves from `https://jedinakdev.github.io/tribios-vfs/`.
 
-This is the one channel where a tag can publish nothing at all without failing.
-The workflow lives on the branch for issue #17.
-If that branch is not merged when you tag, the tag simply has no APT job in it, and the omission is silent.
+Verification runs before the push, so a red run published nothing rather than something broken.
+Each `.deb` is installed in a clean container of its own suite image, and the final job installs from the live repository the way a user does.
+
+`packaging/apt/setup-preview-channel.sh` is how the signing key, the two secrets, the `gh-pages` branch and Pages were created.
+It is untracked, like the Copr and tap setup scripts, and is only needed again for a fork or a key rotation.
 
 Afterwards, check the repository the workflow published rather than the workflow's own green tick, since the two can disagree if a publish step races:
 

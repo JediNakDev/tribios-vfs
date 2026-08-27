@@ -23,6 +23,7 @@ set(TRIBIOS_DESIGN_TESTS
   git_workflow
   end_to_end_build
   packaging_install
+  debian_packaging
   packaging_rpm_spec
   linux_fuse3_build
 )

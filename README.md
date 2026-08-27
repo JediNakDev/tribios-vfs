@@ -26,8 +26,17 @@ macOS will not load the macFUSE system extension until you approve it: open Syst
 **Debian and Ubuntu**
 
 ```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://jedinakdev.github.io/tribios-vfs/apt/tribios-vfs.asc |
+  sudo tee /etc/apt/keyrings/tribios-vfs.asc > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/tribios-vfs.asc] https://jedinakdev.github.io/tribios-vfs/apt $(. /etc/os-release && echo "$VERSION_CODENAME") main" |
+  sudo tee /etc/apt/sources.list.d/tribios-vfs.list > /dev/null
+sudo apt update
 sudo apt install tribios-vfs
 ```
+
+These are preview packages from a project-owned repository, tested on Debian 12 and 13 and Ubuntu 24.04, on amd64 and arm64.
+`docs/install/debian-ubuntu.md` has the tested-suite table and says which distributions are not covered.
 
 **Fedora**
 

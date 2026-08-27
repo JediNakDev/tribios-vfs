@@ -1,0 +1,18 @@
+# The tested-suite matrix, and the only place it is written down. The publish
+# workflow, the install documentation and tests/e2e/debian_packaging.sh all read
+# this file, so a suite is either built, documented and tested, or absent.
+#
+# Columns: suite  container image  architecture
+#
+# A suite qualifies only when it ships CMake 3.24 or newer, a C++23 compiler
+# with <expected>, and libfuse3. Ubuntu 22.04 jammy is excluded because its
+# CMake is 3.22.
+#
+# Both release architectures are built for every suite, because the contract
+# claims x86-64 and arm64 Linux and an unbuilt architecture is an unmet claim.
+bookworm  debian:bookworm  amd64
+bookworm  debian:bookworm  arm64
+trixie    debian:trixie    amd64
+trixie    debian:trixie    arm64
+noble     ubuntu:24.04     amd64
+noble     ubuntu:24.04     arm64
