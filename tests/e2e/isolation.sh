@@ -11,14 +11,12 @@ tribios workspace create two >/dev/null
 # Both Workspaces read the same unchanged Base-state content.
 assert_eq "shared base content" "$(ws_read one docs/notes.txt)" "workspace one initial read"
 assert_eq "shared base content" "$(ws_read two docs/notes.txt)" "workspace two initial read"
-assert_eq "base" "$(ws_layer one docs/notes.txt)" "unchanged content must resolve to the Base state"
 
 # The same Base-state file is mutated differently in each Workspace.
 ws_write one docs/notes.txt "written by one"
 ws_write two docs/notes.txt "written by two"
 assert_eq "written by one" "$(ws_read one docs/notes.txt)" "workspace one after mutation"
 assert_eq "written by two" "$(ws_read two docs/notes.txt)" "workspace two after mutation"
-assert_eq "upper" "$(ws_layer one docs/notes.txt)" "a mutated file must be a private copy"
 
 # The Project source is unchanged.
 assert_eq "shared base content" "$(cat "$PROJECT/docs/notes.txt")" "project source"

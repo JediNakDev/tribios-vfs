@@ -5,6 +5,7 @@
 
 #include "core/error.hpp"
 #include "core/metadata_store.hpp"
+#include "core/workspace_storage.hpp"
 
 namespace tribios {
 
@@ -21,12 +22,11 @@ int sync_parent_directory(const std::filesystem::path& path);
 // exposed by the daemon.
 OutcomeVoid recover_interrupted_operations(const std::filesystem::path& project_root,
                                            const std::filesystem::path& tribios_dir,
-                                           const std::filesystem::path& workspaces_dir,
+                                           WorkspaceStorage& storage,
                                            MetadataStore& store);
 
 OutcomeVoid validate_project_storage_invariants(const std::filesystem::path& project_root,
-                                                const std::filesystem::path& base_dir,
-                                                const std::filesystem::path& workspaces_dir,
+                                                WorkspaceStorage& storage,
                                                 MetadataStore& store);
 
 }  // namespace tribios

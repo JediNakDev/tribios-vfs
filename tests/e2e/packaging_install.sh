@@ -24,11 +24,23 @@ expected="$(printf '%s\n' \
   usr/local/libexec/tribios/tribios_daemon \
   usr/local/share/doc/tribios-vfs/LICENSE \
   usr/local/share/doc/tribios-vfs/README.md | sort)"
+if [ "$(uname -s)" = Linux ]; then
+  expected="$(printf '%s\n' "$expected" \
+    usr/local/lib/systemd/system/tribios-storage.service \
+    usr/local/libexec/tribios/tribios_storage_service | sort)"
+fi
 assert_eq "$expected" "$staged" "staged install layout"
 
 # Internal headers and static libraries are not an SDK and must stay unstaged.
 [ -z "$(cd "$STAGE" && find . -name '*.a' -o -name '*.h' -o -name '*.hpp')" ] ||
   fail "the install staged internal headers or static libraries"
+if command -v otool >/dev/null; then
+  ! otool -L "$STAGE/usr/local/bin/tribios" "$STAGE/usr/local/libexec/tribios/tribios_daemon" |
+    grep -qi fuse || fail "the macOS install depends on FUSE"
+elif command -v ldd >/dev/null; then
+  ! ldd "$STAGE/usr/local/bin/tribios" "$STAGE/usr/local/libexec/tribios/tribios_daemon" |
+    grep -qi fuse || fail "the Linux install depends on FUSE"
+fi
 
 INSTALLED_CLI="$STAGE/usr/local/bin/tribios"
 [ -x "$INSTALLED_CLI" ] || fail "the installed CLI is not executable"

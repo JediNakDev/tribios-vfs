@@ -30,13 +30,14 @@ assert_contains "MIT" "$(head -1 "$REPO_ROOT/LICENSE")"
 assert_eq "%{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz" \
   "$(spec_tag Source0)" "spec Source0 against the published archive name"
 
-# --- the build stays offline and keeps mount support ------------------------
+# --- the build stays offline and excludes FUSE ------------------------------
 
 assert_contains "-DTRIBIOS_BUILD_TESTS=OFF" "$(cat "$SPEC")"
-assert_contains "-DTRIBIOS_ENABLE_FUSE=ON" "$(cat "$SPEC")"
-assert_contains "TRIBIOS_HAVE_FUSE" "$(cat "$SPEC")"
-assert_contains "pkgconfig(fuse3)" "$(cat "$SPEC")"
-assert_contains "Requires:       fuse3" "$(cat "$SPEC")"
+if grep -qi 'pkgconfig(fuse\|Requires:.*fuse\|TRIBIOS_HAVE_FUSE' "$SPEC"; then
+  fail "the RPM spec retains a FUSE dependency"
+fi
+assert_contains "tribios_storage_service" "$(cat "$SPEC")"
+assert_contains "tribios-storage.service" "$(cat "$SPEC")"
 
 # --- %files matches what cmake --install actually stages --------------------
 
@@ -55,12 +56,13 @@ packaged_paths=""
 while IFS= read -r line; do
   case "$line" in
     %files*|%dir*|"") continue ;;
-    %license\ *|%doc\ *) line="${line#* }" ;;
+    %license\ *|%doc\ *|%attr*\ *) line="${line#* }" ;;
     /*|%{*) ;;
     *) continue ;;
   esac
   line="${line/\%\{_bindir\}//usr/bin}"
   line="${line/\%\{_libexecdir\}//usr/libexec}"
+  line="${line/\%\{_unitdir\}//usr/lib/systemd/system}"
   line="${line/\%\{_datadir\}//usr/share}"
   line="${line/\%\{name\}/tribios-vfs}"
   packaged_paths="$packaged_paths$line"$'\n'

@@ -11,18 +11,23 @@ tribios() { "$TRIBIOS_BIN" --project "$project" "$@"; }
 
 if [ "$phase" = prepare ]; then
   "$TRIBIOS_BIN" configure "$project" >/dev/null
-  tribios daemon start --no-mount >/dev/null
+  tribios daemon start >/dev/null
   tribios workspace create restart-durable >/dev/null
-  tribios fs write restart-durable durable.txt machine-restart 0 >/dev/null
-  tribios fs fsync restart-durable durable.txt >/dev/null
-  tribios fs fsyncdir restart-durable "" >/dev/null
+  printf 'machine-restart' > "$PROJECT/.tribios/mnt/restart-durable/durable.txt"
+  python3 - "$PROJECT/.tribios/mnt/restart-durable/durable.txt" <<'PY'
+import os
+import sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+os.fsync(descriptor)
+os.close(descriptor)
+PY
   printf 'READY_TO_REBOOT %s\n' "$project"
   exit 0
 fi
 
 if [ "$phase" = verify ]; then
-  tribios daemon start --no-mount >/dev/null
-  actual="$(tribios fs read restart-durable durable.txt)"
+  tribios daemon start >/dev/null
+  actual="$(cat "$PROJECT/.tribios/mnt/restart-durable/durable.txt")"
   [ "$actual" = machine-restart ] || {
     echo "expected durable machine-restart data, got [$actual]" >&2
     exit 1

@@ -11,7 +11,7 @@
 
 // A uniquely named directory under the system temporary directory, removed with
 // everything below it when the test scope ends. Shared by the tests that need
-// real files on disk: Base capture and tombstone resolution.
+// real files on disk, such as Base capture and metadata persistence.
 class TemporaryDirectory {
  public:
   explicit TemporaryDirectory(std::string_view label) {

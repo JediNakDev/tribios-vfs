@@ -20,8 +20,6 @@ assert_contains "gitone" "$(git -C "$PROJECT" branch --list gitone)"
 assert_contains "gitdir:" "$(ws_read gitone .git)"
 assert_eq "file" "$(ws_stat gitone .git | awk '{print $1}')" ".git must be a linked-worktree pointer file"
 
-require_mount
-
 assert_eq "gitone" "$(git -C "$one" rev-parse --abbrev-ref HEAD)" "branch identity"
 assert_eq "gittwo" "$(git -C "$two" rev-parse --abbrev-ref HEAD)" "sibling branch identity"
 

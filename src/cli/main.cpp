@@ -1,12 +1,10 @@
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/stat.h>
-#ifdef __APPLE__
-#include <sys/mount.h>
-#endif
 #include <unistd.h>
 
 #include <chrono>
+#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -17,6 +15,7 @@
 
 #include "core/base_capture.hpp"
 #include "core/paths.hpp"
+#include "core/proc.hpp"
 #include "core/project_manager.hpp"
 #include "daemon/control_client.hpp"
 
@@ -37,22 +36,18 @@ constexpr const char* kUsage =
     R"(tribios - persistent isolated development Workspaces
 
 usage:
-  tribios configure <project> [--mount <path>] [--force]
+  tribios configure <project> [--mount <path>] [--growth-allowance-bytes <bytes>] [--force]
   tribios info [--project <path>]
-  tribios daemon start [--project <path>] [--no-mount]
+  tribios daemon start [--project <path>]
   tribios daemon stop|status [--project <path>]
   tribios workspace create <name> [--branch <branch>] [--project <path>]
   tribios workspace list [--project <path>]
+  tribios workspace status <name> [--project <path>]
   tribios workspace remove <name> [--project <path>]
   tribios workspace wait-reclaim [--project <path>]
   tribios recovery inspect [--project <path>]
-  tribios fs <verb> <workspace> <args...> [--project <path>]
+  tribios install-privileges
   tribios version
-
-`tribios fs` drives the Workspace engine directly. On macOS and Linux the same
-behavior is reachable through the mounted Workspace path; the verbs exist so
-the test and benchmark harness can exercise identical semantics without a FUSE
-backend.
 )";
 
 struct Options {
@@ -60,8 +55,8 @@ struct Options {
   std::string project;
   std::string mount;
   std::string branch;
+  std::string growth_allowance_bytes;
   bool force = false;
-  bool no_mount = false;
 };
 
 Options parse_command_line(int argc, char** argv) {
@@ -74,10 +69,10 @@ Options parse_command_line(int argc, char** argv) {
       options.mount = argv[++i];
     } else if (argument == "--branch" && i + 1 < argc) {
       options.branch = argv[++i];
+    } else if (argument == "--growth-allowance-bytes" && i + 1 < argc) {
+      options.growth_allowance_bytes = argv[++i];
     } else if (argument == "--force") {
       options.force = true;
-    } else if (argument == "--no-mount") {
-      options.no_mount = true;
     } else {
       options.positional.push_back(argument);
     }
@@ -162,44 +157,35 @@ OutcomeVoid wait_for_socket_to_close(const std::filesystem::path& socket_path,
   return error("the daemon did not stop within the timeout");
 }
 
-bool mount_is_active(const std::filesystem::path& mount_point) {
-#ifdef __APPLE__
-  struct statfs mount_info {};
-  return ::statfs(mount_point.c_str(), &mount_info) == 0 &&
-         std::string_view(mount_info.f_fstypename) == "macfuse";
-#else
-  struct stat mount_stat {};
-  struct stat parent_stat {};
-  return ::stat(mount_point.c_str(), &mount_stat) == 0 &&
-         ::stat(mount_point.parent_path().c_str(), &parent_stat) == 0 &&
-         mount_stat.st_dev != parent_stat.st_dev;
-#endif
-}
-
-OutcomeVoid wait_for_mount_to_close(const std::filesystem::path& mount_point,
-                                    std::chrono::seconds timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (!mount_is_active(mount_point)) return {};
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-  }
-  return error("the mount did not stop within the timeout");
-}
-
 int command_configure(const Options& options) {
   if (options.positional.size() < 2) return report_error("configure needs a project directory");
   const std::filesystem::path root = std::filesystem::absolute(options.positional[1]);
-  auto captured = tribios::ProjectManager::configure(root, options.mount, options.force);
+  std::uint64_t growth_allowance_bytes = 0;
+  if (!options.growth_allowance_bytes.empty()) {
+    const char* begin = options.growth_allowance_bytes.data();
+    const char* end = begin + options.growth_allowance_bytes.size();
+    const auto parsed = std::from_chars(begin, end, growth_allowance_bytes);
+    if (parsed.ec != std::errc{} || parsed.ptr != end || growth_allowance_bytes == 0) {
+      return report_error("growth allowance must be a positive byte count");
+    }
+  }
+  auto captured = tribios::ProjectManager::configure(root, options.mount, options.force,
+                                                     growth_allowance_bytes);
   if (!captured) return report_error(captured.error());
 
   const auto paths = tribios::ProjectPaths::from_project_root(root);
+  auto store = tribios::MetadataStore::open_database_read_only(paths.database);
+  if (!store) return report_error(store.error());
+  const auto record = (*store)->load_project_record();
+  if (!record) return report_error("configured Project record is missing");
   std::cout << "configured " << paths.root << "\n"
             << "base state: " << captured->entry_count << " entries, " << captured->bytes
             << " bytes, captured in " << captured->duration_ms << " ms\n"
             << "mount point: "
             << (options.mount.empty() ? paths.mount_point.string()
                                       : std::filesystem::absolute(options.mount).string())
-            << "\n";
+            << "\nstorage backend: " << record->storage_backend << "\n"
+            << "writable growth allowance: " << record->growth_allowance_bytes << " bytes\n";
   std::cerr << tribios::kSecretsWarning << "\n";
   return 0;
 }
@@ -221,8 +207,6 @@ int command_daemon(const Options& options, const char* argv0) {
     if (!stopped) return report_error(stopped.error());
     auto closed = wait_for_socket_to_close(paths.socket, std::chrono::seconds(15));
     if (!closed) return report_error(closed.error());
-    auto unmounted = wait_for_mount_to_close(paths.mount_point, std::chrono::seconds(15));
-    if (!unmounted) return report_error(unmounted.error());
     std::cout << "stopped\n";
     return 0;
   }
@@ -235,7 +219,6 @@ int command_daemon(const Options& options, const char* argv0) {
 
   const auto daemon_path = resolve_daemon_path(argv0);
   std::vector<std::string> arguments{daemon_path.string(), "--project", paths.root.string()};
-  if (options.no_mount) arguments.push_back("--no-mount");
   std::vector<char*> raw;
   for (auto& argument : arguments) raw.push_back(const_cast<char*>(argument.c_str()));
   raw.push_back(nullptr);
@@ -291,8 +274,16 @@ int command_workspace(const Options& options) {
   if (action == "list") {
     auto listed = tribios::control_request(paths.socket, {"ws.list"});
     if (!listed) return report_error(listed.error());
-    std::cout << "NAME\tSTATE\tBRANCH\tCREATE_US\tLOGICAL_REMOVE_US\tRECLAIM_US\n";
+    std::cout << "NAME\tSTATE\tBRANCH\tCREATE_US\tLOGICAL_REMOVE_US\tRECLAIM_US\tWRITABLE_REMAINING_BYTES\n";
     for (const auto& line : *listed) std::cout << line << "\n";
+    return 0;
+  }
+  if (action == "status") {
+    if (options.positional.size() < 3) return report_error("workspace status needs a name");
+    auto status = tribios::control_request(paths.socket, {"ws.status", options.positional[2]});
+    if (!status) return report_error(status.error());
+    std::cout << "state: " << status->at(0) << "\nwritable capacity bytes: " << status->at(1)
+              << "\nwritable remaining bytes: " << status->at(2) << "\n";
     return 0;
   }
   return report_error("unknown workspace action: " + action);
@@ -311,39 +302,18 @@ int command_info(const Options& options) {
     std::cout << "root: " << record.root << "\nmount: " << record.mount_point
               << "\nkind: git\nbase entries: " << record.base_entry_count
               << "\nbase bytes: " << record.base_bytes
-              << "\nmount backend: unknown\ndaemon: stopped\n";
+              << "\nbase capture ms: " << record.base_capture_ms
+              << "\nstorage backend: " << record.storage_backend
+              << "\nstorage format: " << record.storage_format_version
+              << "\nwritable growth allowance: " << record.growth_allowance_bytes
+              << "\ndaemon: stopped\n";
     return 0;
   }
   std::cout << "root: " << info->at(0) << "\nmount: " << info->at(1) << "\nkind: " << info->at(2)
             << "\nbase entries: " << info->at(3) << "\nbase bytes: " << info->at(4)
-            << "\nbase capture ms: " << info->at(5) << "\nmount backend: " << info->at(6)
-            << "\ndaemon: running\n";
-  return 0;
-}
-
-int command_fs(const Options& options) {
-  if (options.positional.size() < 3) return report_error("fs needs a verb and a workspace");
-  auto project = resolve_configured_project_root(options);
-  if (!project) return report_error(project.error());
-  const auto paths = tribios::ProjectPaths::from_project_root(*project);
-  std::vector<std::string> request{"fs." + options.positional[1]};
-  for (std::size_t i = 2; i < options.positional.size(); ++i) {
-    request.push_back(options.positional[i]);
-  }
-  auto replied = tribios::control_request(paths.socket, request);
-  if (!replied) return report_error(replied.error());
-  for (const auto& field : *replied) std::cout << field << "\n";
-  return 0;
-}
-
-int command_upper_bytes(const Options& options) {
-  if (options.positional.size() < 2) return report_error("upper-bytes needs a workspace");
-  auto project = resolve_configured_project_root(options);
-  if (!project) return report_error(project.error());
-  const auto paths = tribios::ProjectPaths::from_project_root(*project);
-  auto replied = tribios::control_request(paths.socket, {"stats.upper", options.positional[1]});
-  if (!replied) return report_error(replied.error());
-  std::cout << replied->at(0) << "\n";
+            << "\nbase capture ms: " << info->at(5) << "\nstorage backend: " << info->at(6)
+            << "\nstorage format: " << info->at(7)
+            << "\nwritable growth allowance: " << info->at(8) << "\ndaemon: running\n";
   return 0;
 }
 
@@ -361,7 +331,7 @@ int command_recovery(const Options& options) {
   auto diagnostics = (*store)->load_recovery_diagnostics();
   if (!diagnostics) return report_error(diagnostics.error());
 
-  std::cout << "metadata format: 1\n";
+  std::cout << "metadata format: 2\n";
   std::cout << "pending operations: " << operations->size() << "\n";
   for (const auto& operation : *operations) {
     std::cout << "operation " << operation.id << " Workspace " << operation.workspace << " "
@@ -373,6 +343,20 @@ int command_recovery(const Options& options) {
   for (const auto& diagnostic : *diagnostics) {
     std::cout << "R" << diagnostic.id << " " << diagnostic.message << "\n";
   }
+  return 0;
+}
+
+int command_install_privileges(const char* argv0) {
+#ifdef __linux__
+  (void)argv0;
+  auto privileged = tribios::run_process_and_capture_output(
+      {"sudo", "systemctl", "enable", "--now", "tribios-storage.service"});
+  if (!privileged.ok()) return report_error("cannot start the storage service: " + privileged.output);
+  std::cout << "installed Workspace storage privileges\n";
+#else
+  (void)argv0;
+  std::cout << "macOS Workspace storage needs no installation privilege\n";
+#endif
   return 0;
 }
 
@@ -390,8 +374,7 @@ int main(int argc, char** argv) {
   if (command == "workspace") return command_workspace(options);
   if (command == "recovery") return command_recovery(options);
   if (command == "info") return command_info(options);
-  if (command == "fs") return command_fs(options);
-  if (command == "upper-bytes") return command_upper_bytes(options);
+  if (command == "install-privileges") return command_install_privileges(argv[0]);
   if (command == "version" || command == "--version") {
     std::cout << "tribios " << TRIBIOS_VERSION << "\n";
     return 0;

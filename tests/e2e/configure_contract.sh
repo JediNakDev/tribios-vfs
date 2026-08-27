@@ -16,6 +16,7 @@ configure_project
 grep -q "may include secrets" "$WORK/configure.err" ||
   fail "configure must warn that captured ignored files may include secrets"
 grep -q "^base state:" "$WORK/configure.out" || fail "configure must report the Base state size"
+grep -q "^storage backend:" "$WORK/configure.out" || fail "configure must report the backend"
 
 # The Base state is captured once and is immutable.
 if "$TRIBIOS_BIN" configure "$PROJECT" >/dev/null 2>&1; then
@@ -26,11 +27,7 @@ start_daemon
 tribios workspace create untouched >/dev/null
 tribios workspace create doomed >/dev/null
 
-# An untouched Workspace holds no copies of the Base state.
-untouched_bytes="$(tribios upper-bytes untouched)"
-base_bytes="$(grep -o 'base state: [0-9]* entries, [0-9]*' "$WORK/configure.out" | awk '{print $5}')"
-[ "$untouched_bytes" -lt $(( base_bytes / 100 + 4096 )) ] ||
-  fail "an untouched Workspace must not consume Base-state sized storage (got $untouched_bytes)"
+assert_contains "writable remaining bytes:" "$(tribios workspace status untouched)"
 
 # Logical removal makes the Workspace disappear and is reported separately from
 # physical reclamation.

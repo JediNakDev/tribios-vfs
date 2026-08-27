@@ -4,9 +4,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include <cstdlib>
 #include <cstring>
-#include <optional>
 #include <sstream>
 
 #include "daemon/protocol.hpp"
@@ -22,21 +20,6 @@ ControlReply ok_reply(ControlReply payload = {}) {
 }
 
 ControlReply error_reply(const std::string& message) { return {"ERR", message}; }
-
-ControlReply errno_error_reply(int code) {
-  return {"ERR", std::string("errno ") + std::to_string(code) + " " + std::strerror(code)};
-}
-
-ControlReply filesystem_status_reply(const Status& status) {
-  return status ? ok_reply() : errno_error_reply(status.error());
-}
-
-std::string format_file_mode(mode_t mode) {
-  std::ostringstream out;
-  const char* kind = S_ISDIR(mode) ? "dir" : S_ISLNK(mode) ? "symlink" : "file";
-  out << kind << " " << std::oct << (mode & 07777);
-  return out.str();
-}
 
 std::string request_argument(const std::vector<std::string>& request, std::size_t index) {
   return index < request.size() ? request[index] : std::string{};
@@ -62,7 +45,13 @@ ControlReply dispatch_workspace_request(ProjectManager& manager, const std::stri
       std::ostringstream line;
       line << workspace.name << "\t" << workspace_state_name(workspace.state) << "\t"
            << workspace.branch << "\t" << workspace.create_us << "\t"
-           << workspace.logical_remove_us << "\t" << workspace.reclaim_us;
+           << workspace.logical_remove_us << "\t" << workspace.reclaim_us << "\t";
+      if (workspace.state == WorkspaceState::Active) {
+        auto status = manager.workspace_status(workspace.name);
+        line << (status ? std::to_string(status->writable_remaining_bytes) : "unknown");
+      } else {
+        line << "-";
+      }
       payload.push_back(line.str());
     }
     return ok_reply(payload);
@@ -71,105 +60,14 @@ ControlReply dispatch_workspace_request(ProjectManager& manager, const std::stri
     manager.wait_for_reclamation();
     return ok_reply();
   }
+  if (verb == "ws.status") {
+    auto status = manager.workspace_status(request_argument(request, 1));
+    if (!status) return error_reply(status.error());
+    return ok_reply({status->attached ? "attached" : "detached",
+                     std::to_string(status->writable_capacity_bytes),
+                     std::to_string(status->writable_remaining_bytes)});
+  }
   return error_reply("unknown Workspace request: " + verb);
-}
-
-std::optional<ControlReply> dispatch_filesystem_query(WorkspaceEngine& engine,
-                                                      const std::string& verb,
-                                                      const std::string& path) {
-  if (verb == "stats.upper") return ok_reply({std::to_string(engine.upper_bytes())});
-  if (verb == "fs.stat") {
-    auto attributes = engine.getattr(path);
-    if (!attributes) return errno_error_reply(attributes.error());
-    return ok_reply({format_file_mode(attributes->mode), std::to_string(attributes->size),
-                     attributes->from_upper ? "upper" : "base",
-                     std::to_string(attributes->mtime)});
-  }
-  if (verb == "fs.ls") {
-    auto entries = engine.readdir(path);
-    if (!entries) return errno_error_reply(entries.error());
-    ControlReply payload;
-    for (const auto& entry : *entries) payload.push_back(entry.name);
-    return ok_reply(payload);
-  }
-  if (verb == "fs.read") {
-    auto attributes = engine.getattr(path);
-    if (!attributes) return errno_error_reply(attributes.error());
-    auto data = engine.read_file(path, attributes->size, 0);
-    return data ? ok_reply({*data}) : errno_error_reply(data.error());
-  }
-  if (verb == "fs.readlink") {
-    auto target = engine.readlink(path);
-    return target ? ok_reply({*target}) : errno_error_reply(target.error());
-  }
-  return std::nullopt;
-}
-
-ControlReply dispatch_filesystem_mutation(WorkspaceEngine& engine, const std::string& verb,
-                                          const std::vector<std::string>& request,
-                                          const std::string& path) {
-  if (verb == "fs.write") {
-    const std::string data = request_argument(request, 3);
-    const std::uint64_t offset =
-        std::strtoull(request_argument(request, 4).c_str(), nullptr, 10);
-    auto written = engine.write_file(path, data, offset);
-    if (!written) return errno_error_reply(written.error());
-    if (offset == 0) {
-      auto trimmed = engine.truncate(path, *written);
-      if (!trimmed) return errno_error_reply(trimmed.error());
-    }
-    return ok_reply({std::to_string(*written)});
-  }
-  if (verb == "fs.create") return filesystem_status_reply(engine.create(path, 0644));
-  if (verb == "fs.mkdir") return filesystem_status_reply(engine.mkdir(path, 0755));
-  if (verb == "fs.rm") return filesystem_status_reply(engine.unlink(path));
-  if (verb == "fs.rmdir") return filesystem_status_reply(engine.rmdir(path));
-  if (verb == "fs.mv") {
-    return filesystem_status_reply(engine.rename(path, request_argument(request, 3)));
-  }
-  if (verb == "fs.symlink") {
-    return filesystem_status_reply(engine.symlink(path, request_argument(request, 3)));
-  }
-  if (verb == "fs.chmod") {
-    const auto mode =
-        static_cast<mode_t>(std::strtoul(request_argument(request, 3).c_str(), nullptr, 8));
-    return filesystem_status_reply(engine.chmod(path, mode));
-  }
-  if (verb == "fs.truncate") {
-    const std::uint64_t size =
-        std::strtoull(request_argument(request, 3).c_str(), nullptr, 10);
-    return filesystem_status_reply(engine.truncate(path, size));
-  }
-  if (verb == "fs.utimens") {
-    const std::int64_t atime =
-        std::strtoll(request_argument(request, 3).c_str(), nullptr, 10);
-    const std::int64_t mtime =
-        std::strtoll(request_argument(request, 4).c_str(), nullptr, 10);
-    return filesystem_status_reply(engine.utimens(path, atime, mtime));
-  }
-  if (verb == "fs.fsync") {
-    return filesystem_status_reply(engine.fsync_path(path, false, false));
-  }
-  if (verb == "fs.fsyncdir") {
-    return filesystem_status_reply(engine.fsync_path(path, false, true));
-  }
-  if (verb == "fs.hardlink" || verb == "fs.setxattr" || verb == "fs.getxattr" ||
-      verb == "fs.lock" || verb == "fs.mknod") {
-    return errno_error_reply(ENOTSUP);
-  }
-  return error_reply("unknown filesystem request: " + verb);
-}
-
-ControlReply dispatch_filesystem_request(ProjectManager& manager, const std::string& verb,
-                                         const std::vector<std::string>& request) {
-  auto engine = manager.find_active_workspace_engine(request_argument(request, 1));
-  if (engine == nullptr) {
-    return error_reply("no such active Workspace: " + request_argument(request, 1));
-  }
-  const std::string path = request_argument(request, 2);
-  auto query_reply = dispatch_filesystem_query(*engine, verb, path);
-  if (query_reply) return *query_reply;
-  return dispatch_filesystem_mutation(*engine, verb, request, path);
 }
 
 }  // namespace
@@ -178,27 +76,20 @@ std::vector<std::string> ControlServer::dispatch_control_request(
     const std::vector<std::string>& request) {
   if (request.empty()) return error_reply("empty request");
   const std::string& verb = request[0];
-
   if (verb == "ping") return ok_reply({"pong"});
-
   if (verb == "info") {
     const auto& record = manager_.project_record();
     return ok_reply({record.root, record.mount_point, "git",
                      std::to_string(record.base_entry_count), std::to_string(record.base_bytes),
-                     std::to_string(record.base_capture_ms),
-                     mount_active_.load() ? "mounted" : "unmounted"});
+                     std::to_string(record.base_capture_ms), record.storage_backend,
+                     std::to_string(record.storage_format_version),
+                     std::to_string(record.growth_allowance_bytes)});
   }
-
   if (verb == "shutdown") {
     running_.store(false);
     return ok_reply({"stopping"});
   }
-
   if (verb.starts_with("ws.")) return dispatch_workspace_request(manager_, verb, request);
-  if (verb.starts_with("fs.") || verb == "stats.upper") {
-    return dispatch_filesystem_request(manager_, verb, request);
-  }
-
   return error_reply("unknown request: " + verb);
 }
 
@@ -231,8 +122,8 @@ OutcomeVoid ControlServer::serve() {
       buffer.append(chunk, static_cast<std::size_t>(n));
     }
     const auto reply = encode_message(dispatch_control_request(decode_message(buffer)));
-    ssize_t written = ::write(client, reply.data(), reply.size());
-    (void)written;
+    const ssize_t ignored = ::write(client, reply.data(), reply.size());
+    (void)ignored;
     ::close(client);
   }
   ::close(listen_fd_);

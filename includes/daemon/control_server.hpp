@@ -20,16 +20,12 @@ class ControlServer {
   void stop();
   void remove_socket();
 
-  // Reported by `info` so callers know whether a mounted path exists.
-  void set_mount_active(bool active) { mount_active_.store(active); }
-
  private:
   std::vector<std::string> dispatch_control_request(const std::vector<std::string>& request);
 
   ProjectManager& manager_;
   std::filesystem::path socket_path_;
   std::atomic<bool> running_{true};
-  std::atomic<bool> mount_active_{false};
   int listen_fd_ = -1;
 };
 

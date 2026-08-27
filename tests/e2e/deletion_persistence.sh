@@ -13,8 +13,8 @@ ws_rm_rf del vendor
 stop_daemon
 start_daemon
 
-ws_exists del docs/notes.txt && fail "a tombstoned file must stay absent after restart"
-ws_exists del vendor && fail "a tombstoned directory must stay absent after restart"
+ws_exists del docs/notes.txt && fail "a deleted file must stay absent after restart"
+ws_exists del vendor && fail "a deleted directory must stay absent after restart"
 assert_contains "docs" "$(ws_ls del)"
 
 # Re-creating a removed directory must not resurrect its Base-state children.
@@ -28,4 +28,4 @@ start_daemon
 assert_eq "fresh.txt" "$(ws_ls del vendor)" "the re-created directory survives restart"
 
 stop_daemon
-echo "PASS deletion and tombstones"
+echo "PASS deletion persistence"

@@ -8,10 +8,6 @@
 
 #include <string>
 
-#include "core/error.hpp"
-#include "core/metadata_store.hpp"
-#include "core/workspace_engine.hpp"
-#include "temporary_directory.hpp"
 
 using tribios::join_relative;
 using tribios::normalize_relative;
@@ -95,31 +91,4 @@ TEST_CASE("parent_of and join_relative round-trip every path back to itself") {
     const std::string name = relative.substr(parent.empty() ? 0 : parent.size() + 1);
     CHECK(join_relative(parent, name) == relative);
   }
-}
-
-// Regression test for issue #10. The control socket reaches WorkspaceEngine
-// without kernel path resolution in front of it, see
-// dispatch_filesystem_request in src/daemon/control_server.cpp, so a ".." in a
-// caller-supplied path used to name a file outside the Workspace. A mounted
-// FUSE client was never affected: the kernel resolves ".." before the request
-// is delivered.
-TEST_CASE("WorkspaceEngine cannot reach a file outside the Workspace through parent segments") {
-  TemporaryDirectory workspace_root("tribios-traversal");
-  const auto base_dir = workspace_root.path() / "base";
-  const auto upper_dir = workspace_root.path() / "upper";
-  std::filesystem::create_directories(base_dir);
-  std::filesystem::create_directories(upper_dir);
-  write_file_creating_parents(workspace_root.path() / "outside-the-workspace.txt", "private");
-
-  auto store = tribios::MetadataStore::open_database(workspace_root.path() / "meta.db");
-  REQUIRE(store.has_value());
-  tribios::WorkspaceEngine engine("ws", base_dir, upper_dir, **store);
-
-  auto escaped = engine.getattr("../outside-the-workspace.txt");
-  REQUIRE_FALSE(escaped.has_value());
-  CHECK(escaped.error() == ENOENT);
-
-  auto contents = engine.read_file("../outside-the-workspace.txt", 64, 0);
-  REQUIRE_FALSE(contents.has_value());
-  CHECK(contents.error() == ENOENT);
 }

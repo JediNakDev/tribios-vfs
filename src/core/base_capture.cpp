@@ -19,9 +19,10 @@ const char* const kSecretsWarning =
 
 namespace {
 
-OutcomeVoid capture_directory(const std::filesystem::path& source_root,
-                              const std::filesystem::path& base_root, const std::string& relative,
-                              dev_t project_device, CaptureStats& stats) {
+OutcomeVoid copy_directory(const std::filesystem::path& source_root,
+                           const std::filesystem::path& base_root, const std::string& relative,
+                           dev_t project_device, const CaptureProgressReporter& report_progress,
+                           BaseStateCapture& stats) {
   const std::filesystem::path source = relative.empty() ? source_root : source_root / relative;
   std::error_code ec;
   std::filesystem::directory_iterator entries(source, std::filesystem::directory_options::none, ec);
@@ -45,8 +46,9 @@ OutcomeVoid capture_directory(const std::filesystem::path& source_root,
       std::filesystem::create_directories(target, ec);
       if (ec) return error("base capture: cannot create " + target.string());
       ::chmod(target.c_str(), st.st_mode & 07777);
-      auto captured = capture_directory(source_root, base_root, child, project_device, stats);
-      if (!captured) return captured;
+      auto copied =
+          copy_directory(source_root, base_root, child, project_device, report_progress, stats);
+      if (!copied) return copied;
     } else if (S_ISREG(st.st_mode)) {
       std::filesystem::copy_file(entry.path(), target,
                                  std::filesystem::copy_options::overwrite_existing, ec);
@@ -57,26 +59,34 @@ OutcomeVoid capture_directory(const std::filesystem::path& source_root,
       continue;  // special file
     }
     stats.entry_count++;
+    // Capture is the slowest step of Project configuration on macOS, so it
+    // reports often enough to look alive without flooding the terminal.
+    if (report_progress && stats.entry_count % 2000 == 0) {
+      report_progress(stats.entry_count, stats.bytes);
+    }
   }
   return {};
 }
 
 }  // namespace
 
-Outcome<CaptureStats> capture_base_state(const std::filesystem::path& project_root,
-                                         const std::filesystem::path& base_dir) {
+Outcome<BaseStateCapture> copy_workspace_contents(const std::filesystem::path& project_root,
+                                                  const std::filesystem::path& destination,
+                                                  const CaptureProgressReporter& report_progress) {
   struct stat project_st{};
   if (::lstat(project_root.c_str(), &project_st) != 0 || !S_ISDIR(project_st.st_mode)) {
     return error("base capture: " + project_root.string() + " is not a directory");
   }
   std::error_code ec;
-  std::filesystem::create_directories(base_dir, ec);
-  if (ec) return error("base capture: cannot create " + base_dir.string());
+  std::filesystem::create_directories(destination, ec);
+  if (ec) return error("base capture: cannot create " + destination.string());
 
   const auto started = std::chrono::steady_clock::now();
-  CaptureStats stats;
-  auto captured = capture_directory(project_root, base_dir, "", project_st.st_dev, stats);
-  if (!captured) return std::unexpected(captured.error());
+  BaseStateCapture stats;
+  auto copied = copy_directory(project_root, destination, "", project_st.st_dev, report_progress,
+                               stats);
+  if (!copied) return std::unexpected(copied.error());
+  if (report_progress) report_progress(stats.entry_count, stats.bytes);
   stats.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - started)
                           .count();

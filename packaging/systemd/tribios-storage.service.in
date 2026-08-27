@@ -1,0 +1,12 @@
+[Unit]
+Description=Tribios Workspace storage service
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_FULL_LIBEXECDIR@/tribios/tribios_storage_service
+Restart=on-failure
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

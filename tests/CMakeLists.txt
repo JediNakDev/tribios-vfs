@@ -8,23 +8,18 @@ set(TRIBIOS_INVARIANT_TESTS
   workspace_lifecycle
   filesystem_semantics
   isolation
-  deletion_and_tombstones
+  deletion_persistence
   restart_persistence
-  crash_recovery
-  recovery_faults
-  recovery_sequences
-  mounted_crash_recovery
+  native_lifecycle_recovery
 )
 
 # Tier 2: designed decisions traceable to an ADR or a documented deliberate limit.
 set(TRIBIOS_DESIGN_TESTS
   configure_contract
-  unsupported_operations
   git_workflow
   end_to_end_build
   packaging_install
   packaging_rpm_spec
-  linux_fuse3_build
 )
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
@@ -40,9 +35,6 @@ foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
                    TRIBIOS_BUILD_DIR=${CMAKE_BINARY_DIR}
                    bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/${script}.sh)
   set_tests_properties(${script} PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS ${tier})
-  if(script MATCHES "^(crash_recovery|recovery_faults|recovery_sequences)$")
-    set_property(TEST ${script} APPEND PROPERTY ENVIRONMENT TRIBIOS_TEST_NO_MOUNT=1)
-  endif()
 endforeach()
 
 add_subdirectory(unit)

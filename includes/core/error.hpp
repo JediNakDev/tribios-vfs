@@ -6,7 +6,7 @@
 
 namespace tribios {
 
-// Filesystem results carry an errno the FUSE adapter returns unchanged.
+// Internal filesystem helpers return errno-compatible status values.
 template <typename T>
 using Result = std::expected<T, int>;
 using Status = std::expected<void, int>;

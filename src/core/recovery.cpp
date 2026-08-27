@@ -1,14 +1,14 @@
 #include "core/recovery.hpp"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <cerrno>
 #include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include "core/git_worktree.hpp"
@@ -17,11 +17,6 @@
 
 namespace tribios {
 namespace {
-
-bool path_exists_without_following_symlinks(const std::filesystem::path& path) {
-  struct stat st {};
-  return ::lstat(path.c_str(), &st) == 0;
-}
 
 std::string read_first_line(const std::filesystem::path& path) {
   std::ifstream file(path);
@@ -34,57 +29,13 @@ OutcomeVoid recovery_error(const std::filesystem::path& project_root,
                            const RecoveryOperation& operation, const std::string& detail) {
   return error("recovery refused Project " + project_root.string() + ", Workspace " +
                operation.workspace + ", operation " + std::to_string(operation.id) + " (" +
-               operation.kind + ") at " + operation.path + ": " + detail);
-}
-
-bool valid_recovery_relative_path(const std::string& path, bool allow_empty) {
-  if (path.empty()) return allow_empty;
-  return normalize_relative(path) == path;
-}
-
-OutcomeVoid remove_upper_entry(const std::filesystem::path& path, bool directory) {
-  std::error_code ec;
-  if (!path_exists_without_following_symlinks(path)) return {};
-  if (directory) {
-    std::filesystem::remove_all(path, ec);
-  } else {
-    std::filesystem::remove(path, ec);
-  }
-  if (ec) return error("cannot remove " + path.string() + ": " + ec.message());
-  if (const int synced = sync_parent_directory(path); synced != 0) {
-    return error("cannot sync " + path.parent_path().string() + ": " +
-                 std::generic_category().message(synced));
-  }
-  return {};
-}
-
-OutcomeVoid publish_staged_entry(const std::filesystem::path& stage,
-                                 const std::filesystem::path& destination) {
-  std::error_code ec;
-  if (path_exists_without_following_symlinks(stage)) {
-    std::filesystem::create_directories(destination.parent_path(), ec);
-    if (ec) return error("cannot create recovery destination parent: " + ec.message());
-    std::filesystem::rename(stage, destination, ec);
-    if (ec) return error("cannot publish recovered entry: " + ec.message());
-  } else if (!path_exists_without_following_symlinks(destination)) {
-    return error("both the staged entry and published entry are missing");
-  }
-  if (const int synced = sync_parent_directory(destination); synced != 0) {
-    return error("cannot sync recovered destination: " +
-                 std::generic_category().message(synced));
-  }
-  return {};
-}
-
-bool staged_filesystem_operation(std::string_view kind) {
-  return kind == "create" || kind == "mkdir" || kind == "symlink" || kind == "write" ||
-         kind == "truncate" || kind == "chmod" || kind == "utimens" || kind == "rename";
+               operation.kind + "): " + detail);
 }
 
 OutcomeVoid validate_completed_workspace_creation(const std::filesystem::path& project_root,
-                                                  const std::filesystem::path& upper_dir,
+                                                  const std::filesystem::path& workspace_path,
                                                   const RecoveryOperation& operation) {
-  std::ifstream git_file(upper_dir / kGitDirName);
+  std::ifstream git_file(workspace_path / kGitDirName);
   std::string pointer;
   std::getline(git_file, pointer);
   constexpr std::string_view marker = "gitdir: ";
@@ -97,16 +48,15 @@ OutcomeVoid validate_completed_workspace_creation(const std::filesystem::path& p
     return recovery_error(project_root, operation,
                           "active Workspace Git administrative directory is missing");
   }
-  const std::filesystem::path canonical_admin = std::filesystem::weakly_canonical(admin_dir, ec);
-  const std::filesystem::path canonical_registry =
+  const auto canonical_admin = std::filesystem::weakly_canonical(admin_dir, ec);
+  const auto canonical_registry =
       std::filesystem::weakly_canonical(project_root / kGitDirName / "worktrees", ec);
   if (ec || canonical_admin.parent_path() != canonical_registry) {
     return recovery_error(project_root, operation,
                           "Git administrative directory is outside the Project registry");
   }
-  const std::string registered_git_file = read_first_line(admin_dir / "gitdir");
-  if (std::filesystem::path(registered_git_file).filename() != kGitDirName ||
-      std::filesystem::path(registered_git_file).parent_path().filename() != operation.workspace) {
+  const std::filesystem::path registered_git_file = read_first_line(admin_dir / "gitdir");
+  if (registered_git_file != workspace_path / kGitDirName) {
     return recovery_error(project_root, operation,
                           "Git linked-worktree record points at the wrong Workspace");
   }
@@ -114,15 +64,6 @@ OutcomeVoid validate_completed_workspace_creation(const std::filesystem::path& p
       {"git", "--git-dir", admin_dir.string(), "fsck", "--connectivity-only"});
   if (!checked.ok()) {
     return recovery_error(project_root, operation, "Git integrity check failed: " + checked.output);
-  }
-  auto listed = run_process_and_capture_output(
-      {"git", "-C", project_root.string(), "worktree", "list", "--porcelain"});
-  if (!listed.ok() || listed.output.find("worktree " +
-                                         std::filesystem::path(registered_git_file)
-                                             .parent_path().string()) == std::string::npos ||
-      (!operation.target.empty() &&
-       listed.output.find("branch refs/heads/" + operation.target) == std::string::npos)) {
-    return recovery_error(project_root, operation, "Git linked-worktree registry is inconsistent");
   }
   return {};
 }
@@ -181,233 +122,137 @@ int sync_parent_directory(const std::filesystem::path& path) {
 
 OutcomeVoid recover_interrupted_operations(const std::filesystem::path& project_root,
                                            const std::filesystem::path& tribios_dir,
-                                           const std::filesystem::path& workspaces_dir,
-                                           MetadataStore& store) {
+                                           WorkspaceStorage& storage, MetadataStore& store) {
   auto loaded = store.load_recovery_operations();
   if (!loaded) return std::unexpected(loaded.error());
+  const auto project = store.load_project_record();
+  if (!project) return error("Project record is missing during recovery");
 
-  for (auto operation : *loaded) {
+  for (const auto& operation : *loaded) {
+    const auto record = store.load_workspace_record(operation.workspace);
+    const auto workspace_path = storage.workspace_path(operation.workspace);
     if (operation.kind == "workspace_create") {
-      const auto record = store.load_workspace_record(operation.workspace);
-      const std::filesystem::path workspace_dir = workspaces_dir / operation.workspace;
       if (record && record->state == WorkspaceState::Active) {
-        if (auto valid = validate_completed_workspace_creation(
-                project_root, workspace_dir / "upper", operation);
+        if (auto attached = storage.attach_workspace(operation.workspace,
+                                                     record->storage_locator);
+            !attached) {
+          return recovery_error(project_root, operation, attached.error());
+        }
+        if (auto valid = validate_completed_workspace_creation(project_root, workspace_path,
+                                                               operation);
             !valid) {
           return valid;
         }
       } else {
-        const auto project = store.load_project_record();
-        if (!project) {
-          return recovery_error(project_root, operation,
-                                "Project record is missing during Workspace creation rollback");
-        }
-        std::error_code ec;
-        std::filesystem::remove_all(workspace_dir, ec);
-        if (ec) return recovery_error(project_root, operation, ec.message());
         if (auto rolled_back = rollback_linked_worktree_creation(
-                project_root, operation.target,
-                std::filesystem::path(project->mount_point) / operation.workspace,
+                project_root, operation.target, workspace_path,
                 tribios_dir / "staging" / operation.workspace);
             !rolled_back) {
           return recovery_error(project_root, operation, rolled_back.error());
         }
+        const std::string locator = record ? record->storage_locator : std::string{};
+        if (auto detached = storage.detach_workspace(operation.workspace, locator); !detached) {
+          return recovery_error(project_root, operation, detached.error());
+        }
+        if (auto reclaimed = storage.reclaim_workspace(operation.workspace, locator); !reclaimed) {
+          return recovery_error(project_root, operation, reclaimed.error());
+        }
         if (record) {
-          if (auto reclaimed =
-                  store.set_workspace_state(operation.workspace, WorkspaceState::Reclaimed);
-              !reclaimed) {
-            return recovery_error(project_root, operation, reclaimed.error());
+          if (auto updated = store.set_workspace_state(operation.workspace,
+                                                       WorkspaceState::Reclaimed);
+              !updated) {
+            return recovery_error(project_root, operation, updated.error());
           }
         }
       }
-      if (auto abandoned = store.abandon_recovery_operation(operation.id); !abandoned) {
-        return recovery_error(project_root, operation, abandoned.error());
-      }
-      continue;
-    }
-    if (operation.kind == "workspace_remove") {
-      const auto record = store.load_workspace_record(operation.workspace);
+    } else if (operation.kind == "workspace_remove") {
       if (!record || record->state == WorkspaceState::Active) {
-        if (auto abandoned = store.abandon_recovery_operation(operation.id); !abandoned) {
-          return recovery_error(project_root, operation, abandoned.error());
+        if (record) {
+          if (auto attached = storage.attach_workspace(operation.workspace,
+                                                       record->storage_locator);
+              !attached) {
+            return recovery_error(project_root, operation, attached.error());
+          }
         }
-        continue;
-      }
-      const std::string context = "operation=" + std::to_string(operation.id) +
-                                  " workspace=" + operation.workspace;
-      const auto project = store.load_project_record();
-      if (!project) return recovery_error(project_root, operation, "Project record is missing");
-      trigger_failpoint("recovery.workspace_remove.before_git_cleanup", tribios_dir, context);
-      if (auto unregistered = unregister_linked_worktree(
-              project_root, std::filesystem::path(project->mount_point) / operation.workspace);
-          !unregistered) {
-        return recovery_error(project_root, operation, unregistered.error());
-      }
-      trigger_failpoint("recovery.workspace_remove.after_git_cleanup", tribios_dir, context);
-      std::error_code ec;
-      std::filesystem::remove_all(workspaces_dir / operation.workspace, ec);
-      if (ec || sync_directory(workspaces_dir) != 0) {
-        return recovery_error(project_root, operation,
-                              ec ? ec.message() : "cannot flush Workspace cleanup");
-      }
-      trigger_failpoint("recovery.workspace_remove.after_storage_cleanup", tribios_dir, context);
-      if (auto cleared = store.clear_tombstones(operation.workspace); !cleared) {
-        return recovery_error(project_root, operation, cleared.error());
-      }
-      if (auto duration = store.set_workspace_reclamation_duration(operation.workspace, 0);
-          !duration) {
-        return recovery_error(project_root, operation, duration.error());
-      }
-      if (auto reclaimed = store.set_workspace_state(operation.workspace,
+      } else {
+        if (auto detached = storage.detach_workspace(operation.workspace,
+                                                     record->storage_locator);
+            !detached) {
+          return recovery_error(project_root, operation, detached.error());
+        }
+        if (auto unregistered = unregister_linked_worktree(project_root, workspace_path);
+            !unregistered) {
+          return recovery_error(project_root, operation, unregistered.error());
+        }
+        if (auto reclaimed = storage.reclaim_workspace(operation.workspace,
+                                                       record->storage_locator);
+            !reclaimed) {
+          return recovery_error(project_root, operation, reclaimed.error());
+        }
+        if (auto duration = store.set_workspace_reclamation_duration(operation.workspace, 0);
+            !duration) {
+          return recovery_error(project_root, operation, duration.error());
+        }
+        if (auto updated = store.set_workspace_state(operation.workspace,
                                                      WorkspaceState::Reclaimed);
-          !reclaimed) {
-        return recovery_error(project_root, operation, reclaimed.error());
+            !updated) {
+          return recovery_error(project_root, operation, updated.error());
+        }
       }
-      trigger_failpoint("recovery.workspace_remove.after_reclaimed_commit", tribios_dir, context);
-      if (auto abandoned = store.abandon_recovery_operation(operation.id); !abandoned) {
-        return recovery_error(project_root, operation, abandoned.error());
-      }
-      continue;
-    }
-
-    if (operation.workspace.empty() || operation.workspace.find('/') != std::string::npos ||
-        !valid_recovery_relative_path(operation.path, false) ||
-        !valid_recovery_relative_path(operation.target, true)) {
-      return recovery_error(project_root, operation, "journal record contains an unsafe path");
-    }
-    if (operation.kind != "unlink" && operation.kind != "rmdir" &&
-        !staged_filesystem_operation(operation.kind)) {
-      return recovery_error(project_root, operation, "journal record has an unknown operation kind");
-    }
-
-    const std::filesystem::path workspace_dir = workspaces_dir / operation.workspace;
-    const std::filesystem::path upper_dir = workspace_dir / "upper";
-    const std::filesystem::path stage = workspace_dir / "recovery" /
-                                        std::to_string(operation.id);
-    const std::string recovery_context = "operation=" + std::to_string(operation.id) +
-                                         " workspace=" + operation.workspace +
-                                         " path=" + operation.path;
-
-    if (operation.phase == RecoveryPhase::Prepared) {
-      trigger_failpoint("recovery.before_prepared_rollback", tribios_dir, recovery_context);
-      std::error_code ec;
-      std::filesystem::remove_all(stage, ec);
-      if (ec) return recovery_error(project_root, operation, ec.message());
-      if (auto abandoned = store.abandon_recovery_operation(operation.id); !abandoned) {
-        return recovery_error(project_root, operation, abandoned.error());
-      }
-      trigger_failpoint("recovery.after_prepared_rollback", tribios_dir, recovery_context);
-      continue;
-    }
-
-    trigger_failpoint("recovery.before_apply", tribios_dir, recovery_context);
-    OutcomeVoid recovered;
-    if (operation.kind == "unlink") {
-      recovered = remove_upper_entry(upper_dir / operation.path, false);
-    } else if (operation.kind == "rmdir") {
-      recovered = remove_upper_entry(upper_dir / operation.path, true);
     } else {
-      const std::string destination_relative =
-          operation.kind == "rename" ? operation.target : operation.path;
-      recovered = publish_staged_entry(stage, upper_dir / destination_relative);
-      if (recovered && operation.kind == "rename") {
-        recovered = remove_upper_entry(upper_dir / operation.path, true);
-      }
+      return recovery_error(project_root, operation,
+                            "metadata format 2 contains an unknown lifecycle operation");
     }
-    if (!recovered) return recovery_error(project_root, operation, recovered.error());
-    trigger_failpoint("recovery.after_apply", tribios_dir, recovery_context);
-
-    trigger_failpoint("recovery.before_metadata_commit", tribios_dir, recovery_context);
-    if (auto finished = store.finish_recovery_operation(operation); !finished) {
-      return recovery_error(project_root, operation, finished.error());
+    if (auto abandoned = store.abandon_recovery_operation(operation.id); !abandoned) {
+      return recovery_error(project_root, operation, abandoned.error());
     }
-    trigger_failpoint("recovery.after_metadata_commit", tribios_dir, recovery_context);
   }
 
-  // Once every journal record is settled, recovery directories contain no
-  // live state. Reclaim leftovers from crashes during rollback or cleanup.
-  std::error_code cleanup_error;
-  for (const auto& workspace : std::filesystem::directory_iterator(workspaces_dir, cleanup_error)) {
-    if (cleanup_error) return error("cannot inspect recovery artifacts: " + cleanup_error.message());
-    if (!workspace.is_directory(cleanup_error)) continue;
-    const std::filesystem::path recovery_dir = workspace.path() / "recovery";
-    std::filesystem::remove_all(recovery_dir, cleanup_error);
-    if (cleanup_error) return error("cannot reclaim " + recovery_dir.string() + ": " +
-                                    cleanup_error.message());
-  }
-  const std::filesystem::path staging_dir = tribios_dir / "staging";
-  std::filesystem::remove_all(staging_dir, cleanup_error);
-  if (cleanup_error) return error("cannot reclaim staging artifacts: " + cleanup_error.message());
-  std::filesystem::create_directories(staging_dir, cleanup_error);
-  if (cleanup_error || sync_parent_directory(staging_dir) != 0) {
-    return error("cannot recreate durable staging directory");
-  }
+  std::error_code ec;
+  const auto staging_dir = tribios_dir / "staging";
+  std::filesystem::remove_all(staging_dir, ec);
+  std::filesystem::create_directories(staging_dir, ec);
+  if (ec) return error("cannot recreate lifecycle staging storage: " + ec.message());
   return {};
 }
 
 OutcomeVoid validate_project_storage_invariants(const std::filesystem::path& project_root,
-                                                const std::filesystem::path& base_dir,
-                                                const std::filesystem::path& workspaces_dir,
+                                                WorkspaceStorage& storage,
                                                 MetadataStore& store) {
   if (auto database = store.validate_database_integrity(); !database) return database;
-
+  const auto project = store.load_project_record();
+  if (!project) return error("storage invariant failed: Project record is missing");
   std::error_code ec;
-  if (!std::filesystem::is_directory(base_dir, ec)) {
-    return error("storage invariant failed for Project " + project_root.string() +
-                 ": Base state directory is missing");
-  }
-  auto project = store.load_project_record();
-  if (!project) {
-    return error("storage invariant failed for Project " + project_root.string() +
-                 ": Project record is missing");
-  }
   if (std::filesystem::weakly_canonical(project->root, ec) !=
       std::filesystem::weakly_canonical(project_root, ec)) {
-    return error("storage invariant failed for Project " + project_root.string() +
-                 ": Project record points at " + project->root);
+    return error("storage invariant failed: Project record points at " + project->root);
   }
-
   auto pending = store.load_recovery_operations();
   if (!pending) return std::unexpected(pending.error());
-  if (!pending->empty()) {
-    return error("storage invariant failed for Project " + project_root.string() +
-                 ": recovery left operation " + std::to_string(pending->front().id) +
-                 " unsettled");
-  }
+  if (!pending->empty()) return error("storage invariant failed: recovery left an operation open");
 
   for (const auto& workspace : store.load_all_workspace_records()) {
-    if (workspace.name.empty() || workspace.name.find('/') != std::string::npos ||
-        workspace.name == "." || workspace.name == "..") {
-      return error("storage invariant failed for Project " + project_root.string() +
-                   ": Workspace record has an unsafe name " + workspace.name);
+    if (workspace.name.empty() || workspace.name == "." || workspace.name == ".." ||
+        workspace.name.find('/') != std::string::npos) {
+      return error("storage invariant failed: Workspace record has an unsafe name");
     }
-    const std::filesystem::path workspace_dir = workspaces_dir / workspace.name;
     if (workspace.state == WorkspaceState::Creating) {
-      return error("storage invariant failed for Project " + project_root.string() +
-                   ", Workspace " + workspace.name +
-                   ": creation has no recoverable operation record");
+      return error("storage invariant failed: Workspace creation has no recovery operation");
     }
-    if (workspace.state == WorkspaceState::Active) {
-      RecoveryOperation operation;
-      operation.workspace = workspace.name;
-      operation.kind = "validate";
-      operation.path = kGitDirName;
-      operation.target = workspace.branch;
-      if (!std::filesystem::is_directory(workspace_dir / "upper", ec)) {
-        return recovery_error(project_root, operation, "upper tree is missing");
-      }
-      if (auto valid = validate_completed_workspace_creation(
-              project_root, workspace_dir / "upper", operation);
-          !valid) {
-        return valid;
-      }
+    if (workspace.state != WorkspaceState::Active) continue;
+    auto status = storage.inspect_workspace(workspace.name, workspace.storage_locator);
+    if (!status || !status->attached) {
+      return error("storage invariant failed: active Workspace " + workspace.name +
+                   " is not attached");
     }
-    for (const auto& tombstone : store.load_workspace_tombstones(workspace.name)) {
-      if (!valid_recovery_relative_path(tombstone, false)) {
-        return error("storage invariant failed for Project " + project_root.string() +
-                     ", Workspace " + workspace.name + ", path " + tombstone +
-                     ": tombstone path is unsafe");
-      }
+    RecoveryOperation operation;
+    operation.workspace = workspace.name;
+    operation.kind = "validate";
+    operation.target = workspace.branch;
+    if (auto valid = validate_completed_workspace_creation(
+            project_root, storage.workspace_path(workspace.name), operation);
+        !valid) {
+      return valid;
     }
   }
   return {};

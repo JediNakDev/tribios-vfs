@@ -1,4 +1,4 @@
-# Tier 0: pure, self-contained logic. No daemon, no FUSE mount, no Git, no
+# Tier 0: pure, self-contained logic. No daemon, no native mount, no Git, no
 # sleeps. The whole tier is expected to finish in well under two seconds.
 
 include(FetchContent)
@@ -16,7 +16,7 @@ add_executable(tribios_unit_tests
   project_paths_test.cpp
   control_protocol_framing_test.cpp
   base_capture_exclusion_test.cpp
-  tombstone_resolution_test.cpp
+  workspace_storage_test.cpp
 )
 target_link_libraries(tribios_unit_tests PRIVATE tribios_control tribios_core
                                                  Catch2::Catch2WithMain)

@@ -24,9 +24,16 @@ ws_mkdir fs newdir
 ws_write fs newdir/inner.txt "inner"
 assert_contains "inner.txt" "$(ws_ls fs newdir)"
 
-# File and directory durability are available through the direct engine seam.
-tribios fs fsync fs newdir/inner.txt >/dev/null
-tribios fs fsyncdir fs newdir >/dev/null
+# File and directory sync use the native filesystem contract.
+python3 - "$(ws_path fs)/newdir/inner.txt" "$(ws_path fs)/newdir" <<'PY'
+import os
+import sys
+
+for path in sys.argv[1:]:
+    descriptor = os.open(path, os.O_RDONLY)
+    os.fsync(descriptor)
+    os.close(descriptor)
+PY
 
 # Rename stays private to the Workspace.
 ws_mv fs docs/list.txt docs/renamed.txt

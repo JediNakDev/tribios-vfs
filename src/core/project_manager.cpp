@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <system_error>
 #include <unistd.h>
 
@@ -49,53 +50,6 @@ OutcomeVoid write_file_durably(const std::filesystem::path& path, std::string_vi
   return {};
 }
 
-OutcomeVoid verify_durable_backing_layout(const ProjectPaths& paths) {
-  const std::filesystem::path staged_probe = paths.staging_dir / ".backing-layout-probe";
-  const std::filesystem::path published_probe = paths.workspaces_dir / ".backing-layout-probe";
-  auto remove_probes = [&] {
-    std::error_code ignored;
-    std::filesystem::remove(staged_probe, ignored);
-    std::filesystem::remove(published_probe, ignored);
-  };
-
-  if (auto written = write_file_durably(staged_probe, "tribios"); !written) {
-    remove_probes();
-    return error("backing storage does not provide durable staged writes: " + written.error());
-  }
-  if (::rename(staged_probe.c_str(), published_probe.c_str()) != 0) {
-    const std::string reason = std::generic_category().message(errno);
-    remove_probes();
-    return error("backing storage cannot atomically publish staged Workspace data: " + reason);
-  }
-  if (sync_directory(paths.staging_dir) != 0 || sync_directory(paths.workspaces_dir) != 0) {
-    remove_probes();
-    return error("backing storage cannot durably flush a published Workspace entry");
-  }
-
-  remove_probes();
-  if (sync_directory(paths.workspaces_dir) != 0) {
-    return error("backing storage cannot durably remove a published Workspace entry");
-  }
-  return {};
-}
-
-OutcomeVoid sync_tree_durably(const std::filesystem::path& path) {
-  struct stat st {};
-  if (::lstat(path.c_str(), &st) != 0) return error("cannot inspect " + path.string());
-  if (S_ISREG(st.st_mode)) {
-    if (sync_file_data(path) != 0) return error("cannot flush " + path.string());
-    return {};
-  }
-  if (!S_ISDIR(st.st_mode)) return {};
-  std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(path, ec)) {
-    if (ec) return error("cannot inspect " + path.string() + ": " + ec.message());
-    if (auto synced = sync_tree_durably(entry.path()); !synced) return synced;
-  }
-  if (sync_directory(path) != 0) return error("cannot flush " + path.string());
-  return {};
-}
-
 std::uint64_t stable_project_path_hash(const std::string& path) {
   std::uint64_t hash = 14695981039346656037ULL;
   for (const unsigned char byte : path) {
@@ -103,6 +57,12 @@ std::uint64_t stable_project_path_hash(const std::string& path) {
     hash *= 1099511628211ULL;
   }
   return hash;
+}
+
+StorageConfiguration storage_configuration(const ProjectPaths& paths,
+                                           std::uint64_t growth_allowance_bytes) {
+  return StorageConfiguration{paths.root, paths.tribios_dir, paths.base_dir, paths.mount_point,
+                              paths.private_storage_dir, growth_allowance_bytes};
 }
 
 }  // namespace
@@ -118,6 +78,7 @@ ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& projec
   paths.base_dir = paths.tribios_dir / "base";
   paths.workspaces_dir = paths.tribios_dir / "workspaces";
   paths.staging_dir = paths.tribios_dir / "staging";
+  paths.private_storage_dir = paths.tribios_dir / "storage";
   paths.database = paths.tribios_dir / "meta.db";
   paths.mount_point = paths.tribios_dir / "mnt";
   paths.log = paths.tribios_dir / "daemon.log";
@@ -133,14 +94,11 @@ ProjectPaths ProjectPaths::from_project_root(const std::filesystem::path& projec
 
 ProjectManager::~ProjectManager() { wait_for_reclamation(); }
 
-std::filesystem::path ProjectManager::workspace_upper_directory(const std::string& name) const {
-  return paths_.workspaces_dir / name / "upper";
-}
-
-Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& project_root,
-                                                const std::filesystem::path& mount_point,
-                                                bool force) {
-  const ProjectPaths paths = ProjectPaths::from_project_root(project_root);
+Outcome<BaseStateCapture> ProjectManager::configure(const std::filesystem::path& project_root,
+                                                    const std::filesystem::path& mount_point,
+                                                    bool force,
+                                                    std::uint64_t growth_allowance_bytes) {
+  ProjectPaths paths = ProjectPaths::from_project_root(project_root);
   std::error_code ec;
   if (!std::filesystem::is_directory(paths.root, ec))
     return error(paths.root.string() + " is not a directory");
@@ -148,36 +106,58 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
   if (std::filesystem::exists(paths.database, ec) && !force) {
     return error("project is already configured; the Base state is captured once");
   }
-  if (force) std::filesystem::remove_all(paths.tribios_dir, ec);
-  for (const auto& dir :
-       {paths.tribios_dir, paths.workspaces_dir, paths.staging_dir, paths.mount_point}) {
+  if (force || (!std::filesystem::exists(paths.database, ec) &&
+                std::filesystem::exists(paths.tribios_dir, ec))) {
+    std::filesystem::remove_all(paths.tribios_dir, ec);
+    if (ec) return error("cannot clear incomplete Project storage: " + ec.message());
+  }
+  paths.mount_point = mount_point.empty() ? paths.mount_point
+                                          : std::filesystem::absolute(mount_point);
+  for (const auto& dir : {paths.tribios_dir, paths.staging_dir, paths.private_storage_dir,
+                          paths.mount_point}) {
     std::filesystem::create_directories(dir, ec);
     if (ec) return error("cannot create " + dir.string() + ": " + ec.message());
   }
-  if (auto durable = verify_durable_backing_layout(paths); !durable) {
-    return std::unexpected(durable.error());
-  }
 
-  auto captured = capture_base_state(paths.root, paths.base_dir);
+  auto estimated = estimate_workspace_contents(paths.root);
+  if (!estimated) return std::unexpected(estimated.error());
+  const auto growth_allowance =
+      growth_allowance_bytes == 0
+          ? default_growth_allowance_bytes(static_cast<std::uint64_t>(estimated->bytes))
+          : growth_allowance_bytes;
+  const auto configuration = storage_configuration(paths, growth_allowance);
+  const auto capabilities = probe_workspace_storage_capabilities(configuration);
+  auto selected = choose_supported_backend(capabilities);
+  if (!selected) return std::unexpected(selected.error());
+  auto storage = open_workspace_storage(*selected, configuration);
+  if (!storage) return std::unexpected(storage.error());
+  auto captured = (*storage)->capture_base_state(
+      paths.root, [](std::int64_t entries, std::int64_t bytes) {
+        std::cerr << "capturing Base state: " << entries << " entries, " << bytes << " bytes\r";
+      });
+  std::cerr << "\n";
   if (!captured) return std::unexpected(captured.error());
-  if (auto synced = sync_tree_durably(paths.base_dir); !synced) {
-    return std::unexpected(synced.error());
-  }
 
-  auto store = MetadataStore::open_database(paths.database);
+  const auto staged_database = paths.tribios_dir / "meta.db.staging";
+  auto store = MetadataStore::open_database(staged_database);
   if (!store) return std::unexpected(store.error());
 
   ProjectRecord record;
   record.root = paths.root.string();
-  record.mount_point = mount_point.empty() ? paths.mount_point.string()
-                                           : std::filesystem::absolute(mount_point).string();
+  record.mount_point = paths.mount_point.string();
   record.base_captured_at = current_unix_time_seconds();
   record.base_capture_ms = captured->duration_ms;
   record.base_entry_count = captured->entry_count;
   record.base_bytes = captured->bytes;
+  record.storage_backend = *selected;
+  record.storage_format_version = kStorageFormatVersion;
+  record.growth_allowance_bytes = growth_allowance;
   if (auto stored = (*store)->save_project_record(record); !stored) {
     return std::unexpected(stored.error());
   }
+  store->reset();
+  std::filesystem::rename(staged_database, paths.database, ec);
+  if (ec) return error("cannot publish Project metadata: " + ec.message());
   if (sync_directory(paths.tribios_dir) != 0 || sync_parent_directory(paths.tribios_dir) != 0) {
     return error("cannot flush Project metadata directories");
   }
@@ -195,10 +175,18 @@ Outcome<std::unique_ptr<ProjectManager>> ProjectManager::open_configured_project
   if (!store) return std::unexpected(store.error());
   auto record = (*store)->load_project_record();
   if (!record) return error("project record is missing from the metadata store");
+  if (record->storage_format_version != kStorageFormatVersion) {
+    return error("Project storage format " + std::to_string(record->storage_format_version) +
+                 " is unsupported by this build");
+  }
   paths.mount_point = record->mount_point;
 
+  auto storage = open_workspace_storage(
+      record->storage_backend, storage_configuration(paths, record->growth_allowance_bytes));
+  if (!storage) return std::unexpected(storage.error());
+
   if (auto recovered = recover_interrupted_operations(paths.root, paths.tribios_dir,
-                                                      paths.workspaces_dir, **store);
+                                                      **storage, **store);
       !recovered) {
     auto diagnostic = (*store)->record_recovery_diagnostic(paths.root.string(), recovered.error());
     if (diagnostic) {
@@ -207,8 +195,14 @@ Outcome<std::unique_ptr<ProjectManager>> ProjectManager::open_configured_project
     }
     return std::unexpected(recovered.error());
   }
-  if (auto valid = validate_project_storage_invariants(paths.root, paths.base_dir,
-                                                       paths.workspaces_dir, **store);
+  for (const auto& workspace : (*store)->load_all_workspace_records()) {
+    if (workspace.state != WorkspaceState::Active) continue;
+    if (auto attached = (*storage)->attach_workspace(workspace.name, workspace.storage_locator);
+        !attached) {
+      return error("cannot restore Workspace " + workspace.name + ": " + attached.error());
+    }
+  }
+  if (auto valid = validate_project_storage_invariants(paths.root, **storage, **store);
       !valid) {
     auto diagnostic = (*store)->record_recovery_diagnostic(paths.root.string(), valid.error());
     if (diagnostic) {
@@ -217,33 +211,20 @@ Outcome<std::unique_ptr<ProjectManager>> ProjectManager::open_configured_project
     return std::unexpected(valid.error());
   }
 
-  std::unique_ptr<ProjectManager> manager(new ProjectManager(paths, *record, std::move(*store)));
-  for (const auto& workspace : manager->store_->load_all_workspace_records()) {
-    if (workspace.state == WorkspaceState::Active) {
-      manager->engines_.emplace(
-          workspace.name,
-          std::make_shared<WorkspaceEngine>(workspace.name, paths.base_dir,
-                                            manager->workspace_upper_directory(workspace.name),
-                                            *manager->store_));
-    }
-  }
-  return manager;
+  return std::unique_ptr<ProjectManager>(
+      new ProjectManager(paths, *record, std::move(*store), std::move(*storage)));
 }
 
 Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
                                                        const std::string& requested_branch) {
   if (!is_valid_workspace_name(name)) return error("invalid Workspace name: " + name);
-  {
-    std::shared_lock lock(engines_mutex_);
-    if (engines_.contains(name)) return error("Workspace already exists: " + name);
-  }
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
   if (auto existing = store_->load_workspace_record(name);
       existing && existing->state != WorkspaceState::Reclaimed) {
     return error("Workspace name is still in use: " + name);
   }
 
   const std::string branch = requested_branch.empty() ? name : requested_branch;
-  const std::filesystem::path upper = workspace_upper_directory(name);
   const std::filesystem::path workspace_path = paths_.mount_point / name;
   const std::int64_t started = steady_clock_microseconds();
 
@@ -280,24 +261,30 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   trigger_failpoint("workspace_create.after_state_commit", paths_.tribios_dir,
                     operation_context);
 
-  // Creation never traverses the Base state: it makes one empty upper tree and
-  // some metadata, so its cost does not grow with the Project.
-  std::error_code ec;
   if (const int fault = injected_io_error("lifecycle.storage.create"); fault != 0) {
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
     store_->abandon_recovery_operation(operation.id);
     return error("Workspace storage creation failed: " +
                  std::generic_category().message(fault));
   }
-  std::filesystem::create_directories(upper, ec);
-  if (ec) return error("cannot create Workspace storage: " + ec.message());
-  if (sync_parent_directory(upper) != 0) return error("cannot flush Workspace storage directory");
+  auto locator = storage_->create_workspace(name);
+  if (!locator) {
+    store_->set_workspace_state(name, WorkspaceState::Reclaimed);
+    store_->abandon_recovery_operation(operation.id);
+    return std::unexpected(locator.error());
+  }
+  record.storage_locator = *locator;
+  if (auto stored = store_->save_workspace_record(record); !stored) {
+    storage_->reclaim_workspace(name, *locator);
+    store_->abandon_recovery_operation(operation.id);
+    return std::unexpected(stored.error());
+  }
   trigger_failpoint("workspace_create.after_storage", paths_.tribios_dir, operation_context);
 
   auto git_file =
       register_linked_worktree(paths_.root, branch, workspace_path, paths_.staging_dir / name);
   if (!git_file) {
-    std::filesystem::remove_all(upper, ec);
+    storage_->reclaim_workspace(name, *locator);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
     store_->abandon_recovery_operation(operation.id);
     return std::unexpected(git_file.error());
@@ -307,15 +294,15 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   if (const int fault = injected_io_error("lifecycle.git_pointer.write"); fault != 0) {
     rollback_linked_worktree_creation(paths_.root, branch, workspace_path,
                                       paths_.staging_dir / name);
-    std::filesystem::remove_all(upper, ec);
+    storage_->reclaim_workspace(name, *locator);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
     store_->abandon_recovery_operation(operation.id);
     return error("Workspace Git pointer failed: " + std::generic_category().message(fault));
   }
-  if (auto written = write_file_durably(upper / kGitDirName, *git_file); !written) {
+  if (auto written = write_file_durably(workspace_path / kGitDirName, *git_file); !written) {
     rollback_linked_worktree_creation(paths_.root, branch, workspace_path,
                                       paths_.staging_dir / name);
-    std::filesystem::remove_all(upper, ec);
+    storage_->reclaim_workspace(name, *locator);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
     store_->abandon_recovery_operation(operation.id);
     return std::unexpected(written.error());
@@ -328,7 +315,7 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   if (const int fault = injected_io_error("lifecycle.active.write"); fault != 0) {
     rollback_linked_worktree_creation(paths_.root, branch, workspace_path,
                                       paths_.staging_dir / name);
-    std::filesystem::remove_all(upper, ec);
+    storage_->reclaim_workspace(name, *locator);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
     store_->abandon_recovery_operation(operation.id);
     return error("Workspace activation failed: " + std::generic_category().message(fault));
@@ -336,7 +323,7 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   if (auto stored = store_->save_workspace_record(record); !stored) {
     rollback_linked_worktree_creation(paths_.root, branch, workspace_path,
                                       paths_.staging_dir / name);
-    std::filesystem::remove_all(upper, ec);
+    storage_->reclaim_workspace(name, *locator);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
     store_->abandon_recovery_operation(operation.id);
     return std::unexpected(stored.error());
@@ -347,16 +334,12 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
     return std::unexpected(completed.error());
   }
 
-  {
-    std::unique_lock lock(engines_mutex_);
-    engines_.emplace(name,
-                     std::make_shared<WorkspaceEngine>(name, paths_.base_dir, upper, *store_));
-  }
   trigger_failpoint("workspace_create.before_reply", paths_.tribios_dir, operation_context);
   return CreateResult{name, record.branch, record.create_us, workspace_path};
 }
 
 Outcome<RemoveResult> ProjectManager::remove_workspace(const std::string& name) {
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
   const std::int64_t started = steady_clock_microseconds();
   auto record = store_->load_workspace_record(name);
   if (!record || record->state != WorkspaceState::Active) {
@@ -378,31 +361,29 @@ Outcome<RemoveResult> ProjectManager::remove_workspace(const std::string& name) 
                                         " workspace=" + name;
   trigger_failpoint("workspace_remove.after_journal", paths_.tribios_dir, operation_context);
 
-  std::unique_lock lock(engines_mutex_);
-  if (!engines_.contains(name)) {
+  if (auto detached = storage_->detach_workspace(name, record->storage_locator); !detached) {
     store_->abandon_recovery_operation(operation.id);
-    return error("no such active Workspace: " + name);
+    return std::unexpected(detached.error());
   }
+  trigger_failpoint("workspace_remove.after_detach", paths_.tribios_dir, operation_context);
 
-  // The durable removed state is committed while new engine lookups are
-  // blocked. Freeing the upper tree happens afterwards.
   record->state = WorkspaceState::Removed;
   record->removed_at = current_unix_time_seconds();
   record->logical_remove_us = steady_clock_microseconds() - started;
   record->reclaim_us = -1;
   if (const int fault = injected_io_error("lifecycle.removed.write"); fault != 0) {
+    storage_->attach_workspace(name, record->storage_locator);
     store_->abandon_recovery_operation(operation.id);
     return error("Workspace removal state failed: " +
                  std::generic_category().message(fault));
   }
   if (auto stored = store_->save_workspace_record(*record); !stored) {
+    storage_->attach_workspace(name, record->storage_locator);
     store_->abandon_recovery_operation(operation.id);
     return std::unexpected(stored.error());
   }
   trigger_failpoint("workspace_remove.after_removed_commit", paths_.tribios_dir,
                     operation_context);
-  engines_.erase(name);
-  lock.unlock();
   start_workspace_reclamation(name, operation.id);
   trigger_failpoint("workspace_remove.before_reply", paths_.tribios_dir, operation_context);
   return RemoveResult{name, record->logical_remove_us};
@@ -415,18 +396,14 @@ void ProjectManager::start_workspace_reclamation(const std::string& name,
     const std::int64_t started = steady_clock_microseconds();
     const std::string context = "operation=" + std::to_string(operation_id) +
                                 " workspace=" + name;
-    std::error_code ec;
+    const auto record = store_->load_workspace_record(name);
+    if (!record) return;
     trigger_failpoint("workspace_remove.before_git_cleanup", paths_.tribios_dir, context);
     if (!unregister_linked_worktree(paths_.root, paths_.mount_point / name)) return;
     trigger_failpoint("workspace_remove.after_git_cleanup", paths_.tribios_dir, context);
     trigger_failpoint("workspace_remove.before_storage_cleanup", paths_.tribios_dir, context);
-    std::filesystem::remove_all(paths_.workspaces_dir / name, ec);
-    if (ec) return;
-    if (sync_directory(paths_.workspaces_dir) != 0) return;
+    if (!storage_->reclaim_workspace(name, record->storage_locator)) return;
     trigger_failpoint("workspace_remove.after_storage_cleanup", paths_.tribios_dir, context);
-    trigger_failpoint("workspace_remove.before_tombstone_cleanup", paths_.tribios_dir, context);
-    if (!store_->clear_tombstones(name)) return;
-    trigger_failpoint("workspace_remove.after_tombstone_cleanup", paths_.tribios_dir, context);
     if (!store_->set_workspace_reclamation_duration(name, steady_clock_microseconds() - started)) {
       return;
     }
@@ -453,17 +430,19 @@ std::vector<WorkspaceRecord> ProjectManager::workspace_records() {
 }
 
 std::vector<std::string> ProjectManager::active_workspace_names() {
-  std::shared_lock lock(engines_mutex_);
   std::vector<std::string> names;
-  for (const auto& [name, engine] : engines_) names.push_back(name);
+  for (const auto& workspace : store_->load_all_workspace_records()) {
+    if (workspace.state == WorkspaceState::Active) names.push_back(workspace.name);
+  }
   return names;
 }
 
-std::shared_ptr<WorkspaceEngine> ProjectManager::find_active_workspace_engine(
-    const std::string& name) {
-  std::shared_lock lock(engines_mutex_);
-  auto found = engines_.find(name);
-  return found == engines_.end() ? nullptr : found->second;
+Outcome<WorkspaceStorageStatus> ProjectManager::workspace_status(const std::string& name) {
+  auto record = store_->load_workspace_record(name);
+  if (!record || record->state != WorkspaceState::Active) {
+    return error("no such active Workspace: " + name);
+  }
+  return storage_->inspect_workspace(name, record->storage_locator);
 }
 
 }  // namespace tribios

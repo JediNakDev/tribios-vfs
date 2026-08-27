@@ -1,9 +1,7 @@
 # Shared harness for the end-to-end tests.
 #
-# Tests observe behavior through the external seam. With a FUSE backend that
-# seam is the mounted Workspace path driven by ordinary shell tools; without one
-# it is `tribios fs`, which reaches the same engine the callbacks call. The
-# ws_* helpers below pick whichever exists, so one test body covers both.
+# Tests observe behavior through the external seam: the CLI, native Workspace
+# paths, and ordinary filesystem tools.
 
 set -Eeuo pipefail
 
@@ -21,13 +19,12 @@ SKIP_EXIT_CODE=77
 WORK=""
 PROJECT=""
 MOUNT=""
-MOUNTED=0
+MOUNTED=1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# A skip reports success, which is right on a laptop without a FUSE backend and
-# wrong as a gate. CI sets TRIBIOS_REQUIRE_MOUNT=1 to turn every skip into a
-# failure, including a missing build tool: on a runner that is a broken runner.
+# A skip reports success on a host without the required native storage
+# capability and becomes a failure when CI requires that backend.
 skip() {
   if [ "${TRIBIOS_REQUIRE_MOUNT:-}" = "1" ]; then
     fail "TRIBIOS_REQUIRE_MOUNT is set, so skipping is not acceptable: $*"
@@ -52,6 +49,12 @@ tribios() { "$TRIBIOS_BIN" --project "$PROJECT" "$@"; }
 
 cleanup() {
   if [ -n "$PROJECT" ] && [ -d "$PROJECT" ]; then
+    "$TRIBIOS_BIN" --project "$PROJECT" daemon start >/dev/null 2>&1 || true
+    while IFS=$'\t' read -r name state _; do
+      [ "$state" = active ] || continue
+      "$TRIBIOS_BIN" --project "$PROJECT" workspace remove "$name" >/dev/null 2>&1 || true
+    done < <("$TRIBIOS_BIN" --project "$PROJECT" workspace list 2>/dev/null | tail -n +2)
+    "$TRIBIOS_BIN" --project "$PROJECT" workspace wait-reclaim >/dev/null 2>&1 || true
     "$TRIBIOS_BIN" --project "$PROJECT" daemon stop >/dev/null 2>&1 || true
   fi
   [ -n "$WORK" ] && rm -rf "$WORK" 2>/dev/null || true
@@ -102,15 +105,19 @@ EOF
 }
 
 configure_project() {
-  "$TRIBIOS_BIN" configure "$PROJECT" "$@" > "$WORK/configure.out" 2> "$WORK/configure.err"
+  if ! "$TRIBIOS_BIN" configure "$PROJECT" "$@" > "$WORK/configure.out" 2> "$WORK/configure.err"; then
+    if grep -q "no supported Workspace storage backend" "$WORK/configure.err"; then
+      skip "this host cannot provide a native Workspace storage backend"
+    fi
+    cat "$WORK/configure.err" >&2
+    fail "Project configuration failed"
+  fi
   MOUNT="$PROJECT/.tribios/mnt"
 }
 
 start_daemon() {
   local start_output
-  local start_arguments=(daemon start)
-  if [ "${TRIBIOS_TEST_NO_MOUNT:-0}" = 1 ]; then start_arguments+=(--no-mount); fi
-  if ! start_output="$(tribios "${start_arguments[@]}" 2>&1)"; then
+  if ! start_output="$(tribios daemon start 2>&1)"; then
     echo "$start_output" >&2
     if [ -f "$PROJECT/.tribios/daemon.log" ]; then
       echo "daemon log:" >&2
@@ -118,19 +125,12 @@ start_daemon() {
     fi
     fail "the daemon did not start"
   fi
-  local info
-  info="$(tribios info)"
-  case "$info" in
-    *"mount backend: mounted"*) MOUNTED=1 ;;
-    *) MOUNTED=0 ;;
-  esac
+  assert_contains "storage backend:" "$(tribios info)"
 }
 
 stop_daemon() { tribios daemon stop >/dev/null; }
 
-require_mount() {
-  [ "$MOUNTED" = "1" ] || skip "this build has no FUSE backend, so mounted-path tools cannot run"
-}
+require_mount() { :; }
 
 ws_path() { echo "$MOUNT/$1"; }
 
@@ -145,28 +145,16 @@ assert_gone() { # workspace [path]
 # --- Workspace filesystem operations through the available seam -------------
 
 ws_write() { # workspace path data
-  if [ "$MOUNTED" = "1" ]; then
-    mkdir -p "$(dirname "$MOUNT/$1/$2")"
-    printf '%s' "$3" > "$MOUNT/$1/$2"
-  else
-    tribios fs write "$1" "$2" "$3" 0 >/dev/null
-  fi
+  mkdir -p "$(dirname "$MOUNT/$1/$2")"
+  printf '%s' "$3" > "$MOUNT/$1/$2"
 }
 
-ws_read() {
-  if [ "$MOUNTED" = "1" ]; then cat "$MOUNT/$1/$2"; else tribios fs read "$1" "$2"; fi
-}
+ws_read() { cat "$MOUNT/$1/$2"; }
 
-ws_ls() {
-  if [ "$MOUNTED" = "1" ]; then ls -A "$MOUNT/$1/${2:-}" | sort; else tribios fs ls "$1" "${2:-}" | sort; fi
-}
+ws_ls() { ls -A "$MOUNT/$1/${2:-}" | sort; }
 
 ws_exists() {
-  if [ "$MOUNTED" = "1" ]; then
-    [ -e "$MOUNT/$1/$2" ] || [ -L "$MOUNT/$1/$2" ]
-  else
-    tribios fs stat "$1" "$2" >/dev/null 2>&1
-  fi
+  [ -e "$MOUNT/$1/$2" ] || [ -L "$MOUNT/$1/$2" ]
 }
 
 # GNU stat and BSD stat spell "the permission bits" differently.
@@ -177,44 +165,19 @@ else
 fi
 
 ws_stat() { # workspace path -> "<kind> <octal mode>"
-  if [ "$MOUNTED" = "1" ]; then
-    local kind
-    if [ -L "$MOUNT/$1/$2" ]; then kind=symlink
-    elif [ -d "$MOUNT/$1/$2" ]; then kind=dir
-    else kind=file; fi
-    echo "$kind $(file_mode "$MOUNT/$1/$2")"
-  else
-    tribios fs stat "$1" "$2" | head -1
-  fi
+  local kind
+  if [ -L "$MOUNT/$1/$2" ]; then kind=symlink
+  elif [ -d "$MOUNT/$1/$2" ]; then kind=dir
+  else kind=file; fi
+  echo "$kind $(file_mode "$MOUNT/$1/$2")"
 }
 
-ws_layer() { # answers upper or base, so tests can assert what was copied up
-  tribios fs stat "$1" "$2" | sed -n 3p
-}
-
-ws_mkdir() { if [ "$MOUNTED" = "1" ]; then mkdir "$MOUNT/$1/$2"; else tribios fs mkdir "$1" "$2" >/dev/null; fi; }
-ws_rm() { if [ "$MOUNTED" = "1" ]; then rm "$MOUNT/$1/$2"; else tribios fs rm "$1" "$2" >/dev/null; fi; }
-ws_rmdir() { if [ "$MOUNTED" = "1" ]; then rmdir "$MOUNT/$1/$2"; else tribios fs rmdir "$1" "$2" >/dev/null; fi; }
-ws_mv() { if [ "$MOUNTED" = "1" ]; then mv "$MOUNT/$1/$2" "$MOUNT/$1/$3"; else tribios fs mv "$1" "$2" "$3" >/dev/null; fi; }
-ws_symlink() { if [ "$MOUNTED" = "1" ]; then ln -s "$2" "$MOUNT/$1/$3"; else tribios fs symlink "$1" "$2" "$3" >/dev/null; fi; }
-ws_readlink() { if [ "$MOUNTED" = "1" ]; then readlink "$MOUNT/$1/$2"; else tribios fs readlink "$1" "$2"; fi; }
-ws_chmod() { # workspace path mode
-  if [ "$MOUNTED" = "1" ]; then chmod "$3" "$MOUNT/$1/$2"; else tribios fs chmod "$1" "$2" "$3" >/dev/null; fi
-}
-ws_truncate_to_empty() { # workspace path
-  if [ "$MOUNTED" = "1" ]; then : > "$MOUNT/$1/$2"; else tribios fs truncate "$1" "$2" 0 >/dev/null; fi
-}
-ws_rm_rf() { if [ "$MOUNTED" = "1" ]; then rm -rf "$MOUNT/$1/$2"; else ws_remove_tree "$1" "$2"; fi; }
-
-# What `rm -rf` drives through the mounted path, one call at a time.
-ws_remove_tree() {
-  local ws="$1" path="$2" entry
-  if tribios fs stat "$ws" "$path" 2>/dev/null | head -1 | grep -q '^dir'; then
-    for entry in $(tribios fs ls "$ws" "$path"); do
-      ws_remove_tree "$ws" "$path/$entry"
-    done
-    tribios fs rmdir "$ws" "$path" >/dev/null
-  else
-    tribios fs rm "$ws" "$path" >/dev/null
-  fi
-}
+ws_mkdir() { mkdir "$MOUNT/$1/$2"; }
+ws_rm() { rm "$MOUNT/$1/$2"; }
+ws_rmdir() { rmdir "$MOUNT/$1/$2"; }
+ws_mv() { mv "$MOUNT/$1/$2" "$MOUNT/$1/$3"; }
+ws_symlink() { ln -s "$2" "$MOUNT/$1/$3"; }
+ws_readlink() { readlink "$MOUNT/$1/$2"; }
+ws_chmod() { chmod "$3" "$MOUNT/$1/$2"; }
+ws_truncate_to_empty() { : > "$MOUNT/$1/$2"; }
+ws_rm_rf() { rm -rf "$MOUNT/$1/$2"; }

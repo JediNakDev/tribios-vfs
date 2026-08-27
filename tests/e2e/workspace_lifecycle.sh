@@ -20,11 +20,7 @@ assert_contains "local.env" "$entries"
 assert_contains ".git" "$entries"
 assert_eq "SECRET_TOKEN=untracked-and-ignored" "$(ws_read alpha local.env)" "ignored file contents"
 
-# An untouched Workspace holds no copies of the Base state.
-untouched_bytes="$(tribios upper-bytes beta)"
-base_bytes="$(grep -o 'base state: [0-9]* entries, [0-9]*' "$WORK/configure.out" | awk '{print $5}')"
-[ "$untouched_bytes" -lt $(( base_bytes / 100 + 4096 )) ] ||
-  fail "an untouched Workspace must not consume Base-state sized storage (got $untouched_bytes)"
+assert_contains "writable remaining bytes:" "$(tribios workspace status beta)"
 
 # Logical removal makes the Workspace disappear and is reported separately from
 # physical reclamation.

@@ -22,6 +22,9 @@ struct ProjectRecord {
   std::int64_t base_capture_ms = 0;
   std::int64_t base_entry_count = 0;
   std::int64_t base_bytes = 0;
+  std::string storage_backend;
+  std::int64_t storage_format_version = 0;
+  std::uint64_t growth_allowance_bytes = 0;
 };
 
 enum class WorkspaceState { Creating, Active, Removed, Reclaimed };
@@ -37,9 +40,8 @@ struct WorkspaceRecord {
   std::int64_t removed_at = 0;
   std::int64_t logical_remove_us = 0;
   std::int64_t reclaim_us = -1;
+  std::string storage_locator;
 };
-
-enum class RecoveryPhase { Prepared, Publishing };
 
 struct RecoveryOperation {
   std::int64_t id = 0;
@@ -47,9 +49,6 @@ struct RecoveryOperation {
   std::string kind;
   std::string path;
   std::string target;
-  RecoveryPhase phase = RecoveryPhase::Prepared;
-  bool add_path_tombstone = false;
-  bool drop_target_tombstones = false;
 };
 
 struct RecoveryDiagnostic {
@@ -59,8 +58,8 @@ struct RecoveryDiagnostic {
   std::string message;
 };
 
-// Project records, Workspace records, lifecycle state and tombstones. Private
-// file data lives in ordinary directories, never here.
+// Project records, Workspace records and lifecycle state. Private file data
+// lives in native filesystem storage, never here.
 class MetadataStore {
  public:
   ~MetadataStore();
@@ -78,14 +77,7 @@ class MetadataStore {
   OutcomeVoid set_workspace_state(const std::string& name, WorkspaceState state);
   OutcomeVoid set_workspace_reclamation_duration(const std::string& name, std::int64_t reclaim_us);
 
-  OutcomeVoid add_tombstone(const std::string& workspace, const std::string& path);
-  OutcomeVoid remove_tombstones_under(const std::string& workspace, const std::string& path);
-  OutcomeVoid clear_tombstones(const std::string& workspace);
-  std::vector<std::string> load_workspace_tombstones(const std::string& workspace);
-
   Outcome<std::int64_t> begin_recovery_operation(const RecoveryOperation& operation);
-  OutcomeVoid set_recovery_operation_phase(std::int64_t id, RecoveryPhase phase);
-  OutcomeVoid finish_recovery_operation(const RecoveryOperation& operation);
   OutcomeVoid abandon_recovery_operation(std::int64_t id);
   Outcome<std::vector<RecoveryOperation>> load_recovery_operations();
   OutcomeVoid validate_database_integrity();
