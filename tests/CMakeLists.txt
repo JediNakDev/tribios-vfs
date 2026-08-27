@@ -21,8 +21,15 @@ set(TRIBIOS_DESIGN_TESTS
   git_workflow
   end_to_end_build
   packaging_install
-  packaging_rpm_spec
 )
+
+# The RPM spec packages the Linux storage service and its systemd unit, which
+# only a Linux build stages. Comparing %files against a macOS install root
+# would report every Linux-only path as unpackaged, so the test does not apply
+# there rather than skipping, which a strict run would turn into a failure.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND TRIBIOS_DESIGN_TESTS packaging_rpm_spec)
+endif()
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
   if("${script}" IN_LIST TRIBIOS_INVARIANT_TESTS)

@@ -3,12 +3,11 @@ name: Benchmark
 # The measurement run that decides issue #1, following docs/prototype/README.md
 # and docs/prototype/experiment.md exactly.
 #
-# It has to run on macOS with macFUSE, because experiment.md is explicit that
-# macOS is the platform whose measurements decide the issue and that Linux
-# numbers are never substituted for it. macFUSE cannot run on a GitHub-hosted
-# macOS runner (its kernel extension needs manual approval in System Settings
-# plus a reboot, and Reduced Security on Apple Silicon), so this targets a
-# self-hosted macOS runner where a human has already done that once.
+# It has to run on macOS, because experiment.md is explicit that macOS is the
+# platform whose measurements decide the issue and that Linux numbers are never
+# substituted for it. It targets a self-hosted runner rather than a hosted one
+# so the numbers come from real hardware with a stable disk, which the 100,000
+# file and 2 GiB release fixture needs.
 #
 # The job is guarded so the workflow does not fail when no such runner is
 # registered: set the repository variable TRIBIOS_MACOS_BENCH_RUNNER to 'true'
@@ -43,8 +42,8 @@ jobs:
       # 100,000 files and 2 GiB experiment.md specifies.
       FIXTURE_FILES: ${{ github.event_name == 'schedule' && '5000' || '100000' }}
       FIXTURE_BYTES: ${{ github.event_name == 'schedule' && '104857600' || '2147483648' }}
-      # macFUSE is present and approved on this runner, so a skipped test is a
-      # real failure, not an environment limitation.
+      # The APFS adapter works on any macOS host, so a skipped test is a real
+      # failure, not an environment limitation.
       TRIBIOS_REQUIRE_MOUNT: '1'
 
     steps:
@@ -63,8 +62,7 @@ jobs:
       - name: Configure the build
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
-          # fuse.pc from macFUSE lives outside the default pkg-config path.
-          PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig"
+          PKG_CONFIG_PATH="$(brew --prefix sqlite)/lib/pkgconfig"
           export PKG_CONFIG_PATH
           cmake -S . -B build -G Ninja \
             -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
@@ -73,17 +71,17 @@ jobs:
       - name: Build
         run: ninja -C build
 
-      - name: Verify the macFUSE backend was found
-        run: grep -q TRIBIOS_HAVE_FUSE build/compile_commands.json
-
       - name: Generate the fixture
         run: |
           rm -rf "$FIXTURE_PATH" "$SCRATCH_PATH"
           python3 bench/generate_fixture.py "$FIXTURE_PATH" \
             --files "$FIXTURE_FILES" --bytes "$FIXTURE_BYTES"
 
+      # A fallback to another backend would silently measure something else.
       - name: Capture the Base state
-        run: build/tribios configure "$FIXTURE_PATH"
+        run: |
+          build/tribios configure "$FIXTURE_PATH" | tee "$RUNNER_TEMP/configure.out"
+          grep -qx "storage backend: apfs-shadow" "$RUNNER_TEMP/configure.out"
 
       - name: Start the daemon
         run: build/tribios --project "$FIXTURE_PATH" daemon start

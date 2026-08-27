@@ -49,7 +49,7 @@ CI runs independent invariant scripts with `ctest --parallel 4` so deterministic
 
 Tier 2 is designed-decision end-to-end tests, under `tests/e2e/`, labeled `design`.
 They run on every pull request, with a 10 minute budget.
-They are `configure_contract`, `unsupported_operations`, `git_workflow`, `end_to_end_build`, `packaging_install` and `packaging_rpm_spec`.
+They are `configure_contract`, `git_workflow`, `end_to_end_build` and `packaging_install`, plus `packaging_rpm_spec`, which `tests/CMakeLists.txt` registers on Linux only because it compares the spec against a real staged install of the Linux storage service.
 
 Tier 3 is the benchmark, under `bench/`.
 It runs nightly against a small fixture and on release tags against the full 100,000 file, 2 GiB fixture that `docs/prototype/experiment.md` specifies.
@@ -79,15 +79,16 @@ An unregistered script never runs.
 ## Skips
 
 `tests/e2e/lib.sh` exits 77 to report a skip, and `tests/CMakeLists.txt` sets `SKIP_RETURN_CODE 77`.
-A build with no FUSE backend therefore reports green with the mounted-path tests skipped, which is right on a laptop and wrong as a gate.
+A host with no usable Workspace storage backend therefore reports green with the mounted-path tests skipped, which is right on a laptop that has not enabled the Linux storage service and wrong as a gate.
 
 Set `TRIBIOS_REQUIRE_MOUNT=1` to turn every skip into a failure, including a missing build tool.
-CI sets it on the strict Linux job.
+CI sets it on every job that runs tests.
 Set it locally when you need to know that a mounted run actually happened.
 
-Hosted macOS runners cannot mount.
-macFUSE needs manual kernel extension approval, a reboot, and Reduced Security on Apple Silicon.
-So the strict mounted gate runs on Linux, the hosted macOS job builds and exercises the unmounted engine paths only, and the macOS measurements that decide issue #1 come from a self-hosted runner.
+Both platforms can mount on a hosted runner, so both gates are strict.
+macOS attaches APFS sparse images with `hdiutil`, which needs no kernel extension.
+Linux mounts through the storage service, so a CI job has to install it with `cmake --install` and `systemctl enable --now tribios-storage.service` before the mounted tests will do anything but skip.
+The macOS measurements that decide issue #1 still come from a self-hosted runner.
 
 ## Budgets
 

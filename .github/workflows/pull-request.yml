@@ -2,8 +2,8 @@ name: Pull request checks
 
 # The full tier ladder: tier 0 unit, tier 1 invariant, tier 2 design.
 #
-# Linux runs it strictly against a real mount. macOS runs the same ladder
-# without the strict flag, for the reason spelled out on that job.
+# Both platforms run it strictly against a real mount, across the Linux
+# filesystems each Linux backend claims.
 
 on:
   pull_request:
@@ -24,15 +24,22 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, arm64]
-        backing: [ext4, xfs]
+        backing: [ext4, xfs, btrfs]
         include:
           - arch: x86_64
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
+          - backing: ext4
+            expected_backend: overlayfs
+          - backing: xfs
+            expected_backend: overlayfs
+          - backing: btrfs
+            expected_backend: btrfs-snapshot
 
-    # GitHub-hosted Ubuntu runners expose /dev/fuse and libfuse3 is an ordinary
-    # package, so every mounted-path test really mounts here.
+    # A GitHub-hosted Ubuntu runner can install the Workspace storage service
+    # and mount OverlayFS in the host mount namespace, so every mounted-path
+    # test really mounts here.
     # TRIBIOS_REQUIRE_MOUNT=1 turns any skip into a failure.
     env:
       TRIBIOS_REQUIRE_MOUNT: '1'
@@ -41,7 +48,7 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Install build and FUSE dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -50,20 +57,19 @@ jobs:
             pkg-config \
             sqlite3 \
             libsqlite3-dev \
-            libfuse3-dev \
-            fuse3 \
             e2fsprogs \
             xfsprogs \
+            btrfs-progs \
             g++-13
 
       - name: Create the ${{ matrix.backing }} backing filesystem
         run: |
           truncate -s 4G "$RUNNER_TEMP/tribios-backing.img"
-          if [ "${{ matrix.backing }}" = ext4 ]; then
-            sudo mkfs.ext4 -F "$RUNNER_TEMP/tribios-backing.img"
-          else
-            sudo mkfs.xfs -f "$RUNNER_TEMP/tribios-backing.img"
-          fi
+          case "${{ matrix.backing }}" in
+            ext4) sudo mkfs.ext4 -F "$RUNNER_TEMP/tribios-backing.img" ;;
+            xfs) sudo mkfs.xfs -f "$RUNNER_TEMP/tribios-backing.img" ;;
+            btrfs) sudo mkfs.btrfs -f "$RUNNER_TEMP/tribios-backing.img" ;;
+          esac
           sudo mkdir /mnt/tribios-backing
           sudo mount -o loop "$RUNNER_TEMP/tribios-backing.img" /mnt/tribios-backing
           sudo chown "$USER" /mnt/tribios-backing
@@ -75,15 +81,33 @@ jobs:
       - name: Build
         run: ninja -C build
 
-      # A build without a FUSE backend would make every mounted test skip, and
-      # TRIBIOS_REQUIRE_MOUNT would then fail them one by one. Fail here instead,
-      # with a clear reason.
-      - name: Verify a FUSE backend was found
+      # Linux mounts a Workspace through an installed system service, which is
+      # what `tribios install-privileges` enables on a user's machine.
+      # cmake --install runs as root, so the manifest it leaves in the build
+      # tree is handed back: the packaging design tests stage their own install.
+      - name: Install the Workspace storage service
         run: |
-          test -e /dev/fuse
-          grep -q TRIBIOS_HAVE_FUSE build/compile_commands.json
-          grep -q TRIBIOS_FUSE_API_VERSION=31 build/compile_commands.json
+          sudo cmake --install build --prefix /usr/local
+          sudo chown "$USER" build/install_manifest.txt
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now tribios-storage.service
+
+      # Without a usable backend every mounted test would skip, and
+      # TRIBIOS_REQUIRE_MOUNT would then fail them one by one. Fail here
+      # instead, with a clear reason, and name the backend the matrix expects so
+      # a silent fallback to the other one is a failure too.
+      - name: Verify the expected Workspace storage backend is available
+        run: |
           test "$(findmnt -no FSTYPE "$TMPDIR")" = "${{ matrix.backing }}"
+          systemctl is-active tribios-storage.service
+          probe="$(mktemp -d)"
+          git init -q "$probe"
+          git -C "$probe" -c user.email=ci@example.com -c user.name=CI \
+            commit -q --allow-empty -m probe
+          build/tribios configure "$probe" > "$probe.configure.out"
+          cat "$probe.configure.out"
+          grep -qx "storage backend: ${{ matrix.expected_backend }}" "$probe.configure.out"
+          rm -rf "$probe" "$probe.configure.out"
 
       - name: Run unit tests
         run: ctest --test-dir build -L unit --output-on-failure --no-tests=error
@@ -94,25 +118,20 @@ jobs:
       - name: Run design tests
         run: ctest --test-dir build -L design --output-on-failure --no-tests=error
 
-  build-and-unmounted-tests-on-macos:
-    name: Build and unmounted tests on macOS
+  strict-mounted-tests-on-macos:
+    name: Strict mounted tests on macOS
     runs-on: macos-latest
 
-    # This job deliberately does NOT set TRIBIOS_REQUIRE_MOUNT.
+    # The APFS adapter attaches sparse images with hdiutil, which is part of
+    # macOS and needs no kernel extension, no reboot and no Reduced Security.
+    # A hosted runner can therefore mount for real, which the macFUSE prototype
+    # could never do here, so this job is strict like the Linux one.
     #
-    # The FUSE adapter speaks the FUSE 2.x API, which on macOS means macFUSE.
-    # The macFUSE kernel extension has to be approved by hand in System
-    # Settings, Privacy & Security, followed by a reboot, and on Apple Silicon
-    # it also needs Reduced Security with user management of kernel extensions
-    # enabled from Recovery. None of that is possible on a GitHub-hosted macOS
-    # runner, so a mounted run cannot happen here and demanding one would only
-    # produce a permanently red job.
-    #
-    # What this job does buy: macOS compile breakage and the non-mounted engine
-    # paths (the `tribios fs` seam the FUSE callbacks call) are still caught.
-    # The mounted macOS measurements that decide issue #1 come from the
+    # The macOS measurements that decide issue #1 still come from the
     # self-hosted runner in benchmark.yml, per docs/prototype/experiment.md.
     # Linux numbers are never substituted for macOS ones.
+    env:
+      TRIBIOS_REQUIRE_MOUNT: '1'
 
     steps:
       - name: Check out the repository
@@ -135,6 +154,21 @@ jobs:
 
       - name: Build
         run: ninja -C build
+
+      # Without a usable backend every mounted test would skip, and
+      # TRIBIOS_REQUIRE_MOUNT would then fail them one by one. Fail here
+      # instead, with a clear reason.
+      - name: Verify the APFS Workspace storage backend is available
+        run: |
+          probe="$(mktemp -d)/project"
+          mkdir -p "$probe"
+          git init -q "$probe"
+          git -C "$probe" -c user.email=ci@example.com -c user.name=CI \
+            commit -q --allow-empty -m probe
+          build/tribios configure "$probe" > "$probe.configure.out"
+          cat "$probe.configure.out"
+          grep -qx "storage backend: apfs-shadow" "$probe.configure.out"
+          rm -rf "$probe" "$probe.configure.out"
 
       - name: Run unit tests
         run: ctest --test-dir build -L unit --output-on-failure --no-tests=error

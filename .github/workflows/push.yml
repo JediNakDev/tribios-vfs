@@ -1,7 +1,9 @@
 name: Push checks
 
 # Tier 0 and tier 1 on every branch push: fast feedback, Linux only.
-# The strict mounted gate lives in pull-request.yml.
+# It mounts for real, because a tier 1 run whose mounted tests all skip is not
+# a gate. The wider gate, every backing filesystem plus tier 2 and macOS, lives
+# in pull-request.yml.
 
 on:
   push:
@@ -20,11 +22,15 @@ jobs:
     name: Unit and invariant tests on Linux
     runs-on: ubuntu-latest
 
+    # TRIBIOS_REQUIRE_MOUNT=1 turns any skip into a failure.
+    env:
+      TRIBIOS_REQUIRE_MOUNT: '1'
+
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Install build and FUSE dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -33,8 +39,6 @@ jobs:
             pkg-config \
             sqlite3 \
             libsqlite3-dev \
-            libfuse3-dev \
-            fuse3 \
             g++-13
 
       # C++23 std::expected needs GCC 12 or newer. The image default is not
@@ -44,6 +48,16 @@ jobs:
 
       - name: Build
         run: ninja -C build
+
+      # Linux mounts a Workspace through an installed system service, which is
+      # what `tribios install-privileges` enables on a user's machine.
+      - name: Install the Workspace storage service
+        run: |
+          sudo cmake --install build --prefix /usr/local
+          sudo chown "$USER" build/install_manifest.txt
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now tribios-storage.service
+          systemctl is-active tribios-storage.service
 
       # --no-tests=error keeps a label that matches nothing from passing silently.
       - name: Run unit tests
