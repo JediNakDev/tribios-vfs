@@ -36,6 +36,37 @@ tribios install-privileges
 
 An AUR package is planned after the registry is available again.
 
+### From source
+
+```sh
+cmake -S . -B build -G Ninja
+ninja -C build
+sudo cmake --install build --prefix /usr/local
+```
+
+The build needs CMake 3.24 or newer, Ninja, a C++23 compiler, and SQLite with its development headers.
+On Linux the install stages the Workspace storage service and its systemd unit next to the CLI, which is what the packages above install for you.
+
+## Workspace storage privileges on Linux
+
+Linux mounts every Workspace in the host mount namespace, which an unprivileged process cannot do.
+A small system service performs the mounting, unmounting, and privileged Btrfs deletion for the calling user.
+It authenticates callers through Unix peer credentials and accepts paths only below a Project directory the caller owns.
+
+Enable it once per machine, after installing Tribios:
+
+```sh
+tribios install-privileges
+```
+
+The command enables and starts `tribios-storage.service` through `sudo systemctl`, so it asks for a password once.
+Ordinary Workspace commands never do.
+Until it runs, `tribios configure` reports that no supported Workspace storage backend is available.
+
+A Project also has to live on a filesystem one of the Linux backends supports: Btrfs, which Tribios prefers, or any local filesystem the kernel accepts as an OverlayFS upper layer, such as ext4 or XFS.
+
+macOS needs no equivalent step, because its APFS sparse images and shadows need no privilege beyond the user's own.
+
 ## Use
 
 Configure an existing Git Project and start its daemon:
