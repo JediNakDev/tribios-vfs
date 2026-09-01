@@ -59,7 +59,7 @@ Automatic, and the longest of the four.
 Verification runs before the push, so a red run published nothing rather than something broken.
 Each `.deb` is installed in a clean container of its own suite image, and the final job installs from the live repository the way a user does.
 
-`packaging/apt/setup-preview-channel.sh` is how the signing key, the two secrets, the `gh-pages` branch and Pages were created.
+`local/setup-preview-channel.sh` is how the signing key, the two secrets, the `gh-pages` branch and Pages were created.
 It is untracked, like the Copr and tap setup scripts, and is only needed again for a fork or a key rotation.
 
 Afterwards, check the repository the workflow published rather than the workflow's own green tick, since the two can disagree if a publish step races:
@@ -79,7 +79,7 @@ A broken spec is fixable without cutting a new version: push the fix to `main` a
 Run the wizard, which walks the account, the project, the chroots, the build and the per-chroot container acceptance, and prints the values worth recording at the end:
 
 ```sh
-./packaging/publish-copr-preview.sh
+./local/publish-copr-preview.sh
 ```
 
 It refuses to start until the release exists, and it never tags or pushes.

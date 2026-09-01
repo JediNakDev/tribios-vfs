@@ -203,7 +203,7 @@ marks its report as ineligible for the final issue verdict.
 Run the final benchmark detached from the terminal so a terminal closure cannot interrupt it:
 
 ```sh
-./bench/start_final_benchmark.sh
+./local/start_final_benchmark.sh
 cat /Volumes/PortableSSD/tribios-vfs-benchmark/latest/status.txt
 ```
 
@@ -211,7 +211,7 @@ The harness prints progress for every phase and repetition and checkpoints each 
 Resume an interrupted run by passing its run directory to the detached launcher:
 
 ```sh
-./bench/start_final_benchmark.sh --resume /Volumes/PortableSSD/tribios-vfs-benchmark/runs/<run-id>
+./local/start_final_benchmark.sh --resume /Volumes/PortableSSD/tribios-vfs-benchmark/runs/<run-id>
 ```
 
 A checkpoint has `state: running` and is never eligible for the final verdict.

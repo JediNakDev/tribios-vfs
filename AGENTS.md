@@ -39,7 +39,7 @@ The file contains local-only instructions and must remain uncommitted.
 Run the tier that matches what you are doing, and never the full suite or the benchmark by reflex.
 Run `ctest -L unit` after every build, and `-L unit`, `-L invariant` and `-L design` before every commit.
 Every new test must be registered in a tier.
-See `TEST.md`.
+See `tests/TEST.md`.
 
 ### Issue tracker
 
