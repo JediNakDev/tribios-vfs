@@ -15,6 +15,7 @@ add_library(tribios_core STATIC
   src/core/metadata_store.cpp
   src/core/recovery.cpp
   src/core/fault_injection.cpp
+  src/core/capture_policy.cpp
   src/core/base_capture.cpp
   src/core/workspace_engine.cpp
   src/core/git_worktree.cpp

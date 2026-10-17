@@ -34,6 +34,7 @@ _Avoid_: Tracked files, source files
 **Capture exclusion**:
 A Project-relative rule that prevents matching content from entering future Base states.
 It is independent of Git ignore rules and never changes existing Base states or Workspaces.
+Capture exclusions are the patterns in the Project's root `.tribiosignore`, plus Tribios' fixed rules, which no pattern overrides.
 _Avoid_: Git ignore, Workspace ignore
 
 **Workspace lifecycle**:

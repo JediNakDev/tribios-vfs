@@ -19,6 +19,7 @@ set(TRIBIOS_INVARIANT_TESTS
 # Tier 2: designed decisions traceable to an ADR or a documented deliberate limit.
 set(TRIBIOS_DESIGN_TESTS
   configure_contract
+  capture_policy
   unsupported_operations
   git_workflow
   end_to_end_build

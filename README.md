@@ -70,6 +70,11 @@ tribios info
 
 `tribios configure` captures the project's current files as an immutable Base state, including ignored and untracked files.
 Review the warning it prints before continuing.
+
+To keep secrets, caches, or machine-specific files out of every Workspace, list them in a `.tribiosignore` file at the project root before you configure.
+It uses gitignore-style patterns and is independent of `.gitignore`.
+Preview the result with `tribios configure . --dry-run`, and ask why one path is included or excluded with `tribios check-ignore <path>`.
+See [`docs/tribiosignore.md`](docs/tribiosignore.md) for the full syntax.
 Run `tribios info` and confirm that it reports `mount backend: mounted`.
 
 Create a Workspace for an agent, then work inside its mounted directory:
