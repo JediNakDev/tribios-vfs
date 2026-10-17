@@ -1,6 +1,7 @@
-# Fedora and EPEL spec for the Copr preview repository.
-# docs/packaging/copr.md records how the Copr project is wired up and which
-# chroots are claimed. docs/release-and-install-contract.md is the upstream
+# Fedora and EPEL spec for the Copr preview repository, also built natively on
+# Amazon Linux 2023. docs/packaging/copr.md records how the Copr project is
+# wired up and which chroots are claimed; docs/install/amazon-linux-2023.md
+# covers the Amazon Linux build. docs/release-and-install-contract.md is the upstream
 # contract this spec builds against: it installs exactly four files and never
 # touches Project data under .tribios.
 #
@@ -17,15 +18,19 @@ License:        MIT
 URL:            https://github.com/JediNakDev/tribios-vfs
 Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
 
-BuildRequires:  cmake >= 3.24
+BuildRequires:  cmake >= 3.22
 BuildRequires:  ninja-build
 BuildRequires:  pkgconfig
 BuildRequires:  pkgconfig(sqlite3)
 BuildRequires:  pkgconfig(fuse3)
 # std::expected needs libstdc++ 12 or newer. RHEL 9's system GCC is 11, so the
-# EPEL 9 build uses a toolset compiler. Fedora and EPEL 10 are new enough.
+# EPEL 9 build uses a toolset compiler. Amazon Linux 2023's system GCC is also
+# 11, and it ships GCC 14 as the parallel gcc14 packages. Fedora and EPEL 10 are
+# new enough.
 %if 0%{?rhel} == 9
 BuildRequires:  gcc-toolset-14-gcc-c++
+%elif 0%{?amzn} == 2023
+BuildRequires:  gcc14-c++
 %else
 BuildRequires:  gcc-c++ >= 12
 %endif
@@ -50,6 +55,9 @@ start`. This package installs no system service and configures no project.
 %build
 %if 0%{?rhel} == 9
 . /opt/rh/gcc-toolset-14/enable
+%endif
+%if 0%{?amzn} == 2023
+export CC=gcc14-gcc CXX=gcc14-g++
 %endif
 # The test tier fetches Catch2 over the network at configure time, which a
 # package build cannot do.

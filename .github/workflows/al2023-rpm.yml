@@ -1,0 +1,113 @@
+name: Amazon Linux 2023 RPM
+
+# Builds packaging/rpm/tribios-vfs.spec natively in Amazon Linux 2023 and proves
+# the result installs, runs the core workflow and survives an upgrade in a clean
+# container. On a tag, the RPMs are attached to the GitHub release, which is the
+# distribution channel: Copr has no Amazon Linux chroot, and no EPEL build is
+# binary compatible with it. docs/install/amazon-linux-2023.md records this.
+
+on:
+  pull_request:
+    paths:
+      - CMakeLists.txt
+      - packaging/rpm/**
+      - .github/workflows/al2023-rpm.yml
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    # Native runners rather than qemu: an emulated C++ build is slow enough to
+    # dominate the whole workflow.
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    container:
+      image: amazonlinux:2023
+    steps:
+      - name: Install git and tar for the checkout action
+        run: dnf -y install git-core tar gzip
+
+      - uses: actions/checkout@v4
+
+      # The package that ships carries the spec's own Release. The second build
+      # is the same tree with Release 0, which sorts before it, so the verify job
+      # has an older package to upgrade from even before a second release exists.
+      - name: Build the package
+        run: packaging/rpm/al2023/build-rpm.sh . "$RUNNER_TEMP/out/candidate"
+
+      - name: Build an older Release to upgrade from
+        run: packaging/rpm/al2023/build-rpm.sh . "$RUNNER_TEMP/out/previous" 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-al2023-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+
+  verify:
+    name: Install ${{ matrix.arch }} in a clean container
+    needs: build
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm-al2023-${{ matrix.arch }}
+          path: incoming
+
+      - name: Clean install and core workflow
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work amazonlinux:2023 \
+            bash packaging/rpm/al2023/verify-install.sh \
+            --rpm "/work/$(ls incoming/candidate/*.rpm)"
+
+      - name: Upgrade keeps Project data
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work amazonlinux:2023 \
+            bash packaging/rpm/al2023/verify-install.sh \
+            --rpm "/work/$(ls incoming/candidate/*.rpm)" \
+            --upgrade-from "/work/$(ls incoming/previous/*.rpm)"
+
+  publish:
+    name: Attach the RPMs to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rpm-al2023-*
+          path: incoming
+
+      # release.yml creates the release from the same tag push, so it may not
+      # exist yet when this job starts.
+      - name: Upload the RPMs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for attempt in $(seq 1 30); do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
+            sleep 20
+          done
+          gh release view "$GITHUB_REF_NAME" >/dev/null ||
+            { echo "release $GITHUB_REF_NAME was never created" >&2; exit 1; }
+          gh release upload "$GITHUB_REF_NAME" --clobber incoming/rpm-al2023-*/candidate/*.rpm

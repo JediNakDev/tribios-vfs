@@ -32,7 +32,7 @@ Claim only what is actually built and tested.
 - The current stable Fedora releases and rawhide, on `x86_64` and `aarch64`.
 - `epel-10`, whose GCC 14 compiles C++23 as it stands.
 - `epel-9` only if its build passes.
-  RHEL 9's system GCC is 11 and has no `<expected>`, so the spec switches to `gcc-toolset-14-gcc-c++` there, and `cmake` must be 3.24 or newer, which means RHEL 9.4 or later.
+  RHEL 9's system GCC is 11 and has no `<expected>`, so the spec switches to `gcc-toolset-14-gcc-c++` there, and `cmake` must be 3.22 or newer.
   `fuse-devel` on EPEL 9 comes from CRB, so the chroot needs CRB enabled.
   Drop the chroot rather than weakening the code if any of that fails.
 
@@ -41,7 +41,8 @@ The spec carries no conditionals for arbitrary RHEL derivatives; Fedora's packag
 
 Amazon Linux 2023 is a separate build target, not a relabelled EPEL binary.
 AWS states that no EPEL version is binary compatible with AL2023, so it needs its own build and its own test in an Amazon Linux environment.
-It is tracked in issue #23 and is not enabled here.
+The same spec builds there natively and ships as release assets rather than through Copr, which has no AL2023 chroot.
+[`docs/install/amazon-linux-2023.md`](../install/amazon-linux-2023.md) describes that build.
 
 ## Setting up the Copr project
 
