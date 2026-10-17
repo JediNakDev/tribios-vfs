@@ -340,12 +340,14 @@ int tri_fsync(const char* path, int data_only, struct fuse_file_info* info) {
   return status ? 0 : -status.error();
 }
 
-int tri_flush(const char* path, struct fuse_file_info* info) {
-  if (info == nullptr) return -EBADF;
-  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
-  if (engine == nullptr) return -ENOENT;
-  auto status = engine->fsync_handle(static_cast<int>(info->fh), false);
-  return status ? 0 : -status.error();
+// FUSE calls flush on every close, and neither POSIX nor ADR 0005 makes close
+// durable: only a successful fsync has to survive a restart. Writes already
+// reach the backing file synchronously and report their errors at write time,
+// so there is nothing left to flush here. Syncing instead cost a full data and
+// directory barrier per closed file, which is what made a mounted build on
+// Linux hundreds of times slower than the native baseline.
+int tri_flush(const char*, struct fuse_file_info* info) {
+  return info == nullptr ? -EBADF : 0;
 }
 
 int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {

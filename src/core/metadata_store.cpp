@@ -22,9 +22,15 @@ std::string escape_like_wildcards(const std::string& text) {
   return escaped;
 }
 
+// ADR 0005 requires durability for successful `fsync` calls and Workspace
+// lifecycle commands, and only atomicity for unsynced writes. Write-ahead
+// logging keeps every commit atomic at `NORMAL`, so ordinary mutations skip the
+// per-commit flush and `make_metadata_durable` supplies the barrier at the two
+// points the contract names. `FULL` instead flushed on every journal commit,
+// which cost eighteen barriers per mounted file creation on Linux.
 constexpr const char* kSchema = R"sql(
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
+PRAGMA synchronous = NORMAL;
 CREATE TABLE IF NOT EXISTS project (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   root TEXT NOT NULL,
@@ -429,6 +435,22 @@ Outcome<std::vector<RecoveryOperation>> MetadataStore::load_recovery_operations(
   }
   sqlite3_finalize(statement);
   return operations;
+}
+
+// Flushes every metadata commit made since the last barrier. Checkpointing the
+// write-ahead log writes it into the database and flushes both files, which is
+// what makes the commits behind it survive a machine restart. The connection's
+// total change count answers whether anything is pending, so a caller that
+// syncs a file no other operation touched pays nothing.
+OutcomeVoid MetadataStore::make_metadata_durable() {
+  std::lock_guard lock(mutex_);
+  const int total_changes = sqlite3_total_changes(db_);
+  if (total_changes == checkpointed_total_changes_) return {};
+  if (auto checkpointed = execute_sql(db_, "PRAGMA wal_checkpoint(FULL)"); !checkpointed) {
+    return checkpointed;
+  }
+  checkpointed_total_changes_ = total_changes;
+  return {};
 }
 
 OutcomeVoid MetadataStore::validate_database_integrity() {
