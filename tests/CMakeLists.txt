@@ -7,6 +7,7 @@
 set(TRIBIOS_INVARIANT_TESTS
   workspace_lifecycle
   filesystem_semantics
+  directory_enumeration
   isolation
   deletion_and_tombstones
   restart_persistence
@@ -15,6 +16,8 @@ set(TRIBIOS_INVARIANT_TESTS
   recovery_sequences
   mounted_crash_recovery
 )
+
+add_executable(tribios_directory_enumeration e2e/directory_enumeration.cpp)
 
 # Tier 2: designed decisions traceable to an ADR or a documented deliberate limit.
 set(TRIBIOS_DESIGN_TESTS
@@ -38,6 +41,7 @@ foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
            COMMAND ${CMAKE_COMMAND} -E env
                    TRIBIOS_BIN=$<TARGET_FILE:tribios>
                    TRIBIOS_DAEMON=$<TARGET_FILE:tribios_daemon>
+                   TRIBIOS_DIRECTORY_PROBE=$<TARGET_FILE:tribios_directory_enumeration>
                    TRIBIOS_BUILD_DIR=${CMAKE_BINARY_DIR}
                    bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/${script}.sh)
   set_tests_properties(${script} PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS ${tier})
