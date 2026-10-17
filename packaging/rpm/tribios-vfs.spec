@@ -31,6 +31,9 @@ BuildRequires:  pkgconfig(fuse3)
 BuildRequires:  gcc-toolset-14-gcc-c++
 %elif 0%{?amzn} == 2023
 BuildRequires:  gcc14-c++
+# Amazon Linux builds the annobin plugin for its system GCC only, and the
+# default build flags load it, which gcc14 cannot do.
+%undefine _annotated_build
 %else
 BuildRequires:  gcc-c++ >= 12
 %endif
