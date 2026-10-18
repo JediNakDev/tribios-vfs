@@ -119,6 +119,7 @@ int main(int argc, char** argv) {
   std::thread mount_thread;
   if (mount && tribios::mount_supported()) {
     glb_mount_point = paths.mount_point;
+    server.set_external_change_handler(tribios::forget_kernel_cache_for_workspace_path);
     mount_thread = std::thread([&] {
       auto mounted = tribios::run_project_mount(**manager, paths.mount_point, debug);
       if (!mounted) std::cerr << "tribios_daemon: " << mounted.error() << "\n";
