@@ -9,9 +9,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "core/paths.hpp"
 #include "core/proc.hpp"
@@ -451,15 +453,34 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
   return {};
 }
 
-void request_unmount(const std::filesystem::path& mount_point) {
+OutcomeVoid unmount_project_view(const std::filesystem::path& mount_point) {
 #ifdef __APPLE__
-  if (!run_process_and_capture_output({"umount", mount_point.string()}).ok()) {
-    run_process_and_capture_output({"diskutil", "unmount", "force", mount_point.string()});
-  }
+  if (run_process_and_capture_output({"umount", mount_point.string()}).ok()) return {};
+  auto forced =
+      run_process_and_capture_output({"diskutil", "unmount", "force", mount_point.string()});
+  if (!forced.ok()) return error("cannot unmount " + mount_point.string() + ": " + forced.output);
+  return {};
 #else
-  // An unprivileged Linux user unmounts through the libfuse3 helper.
-  if (!run_process_and_capture_output({"fusermount3", "-u", mount_point.string()}).ok()) {
-    run_process_and_capture_output({"umount", mount_point.string()});
+  // An unprivileged Linux user unmounts through the libfuse3 helper. Indexers,
+  // file watchers and the kernel's own file sharing can hold the mount for a
+  // moment after the last tool leaves it, so a busy mount is retried.
+  constexpr auto kBusyRetryWindow = std::chrono::seconds(5);
+  const auto deadline = std::chrono::steady_clock::now() + kBusyRetryWindow;
+  while (true) {
+    auto unmounted =
+        run_process_and_capture_output({"fusermount3", "-u", mount_point.string()});
+    if (unmounted.ok()) return {};
+    if (unmounted.output.find("busy") == std::string::npos) {
+      // Root, or an fstab entry, can still unmount without the helper.
+      if (run_process_and_capture_output({"umount", mount_point.string()}).ok()) return {};
+      return error("cannot unmount " + mount_point.string() + ": " + unmounted.output);
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return error("the mount at " + mount_point.string() +
+                   " is busy: stop tools whose working directory or open files are inside it, "
+                   "then retry");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 #endif
 }

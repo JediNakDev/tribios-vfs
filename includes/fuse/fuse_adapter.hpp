@@ -19,7 +19,9 @@ std::string mount_unavailable_reason();
 OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::path& mount_point,
                               bool debug);
 
-// Asks the kernel to unmount the Project view.
-void request_unmount(const std::filesystem::path& mount_point);
+// Unmounts the Project view. macOS forces the unmount when it is busy. An
+// unprivileged Linux user cannot, so a Linux mount that something holds for
+// the whole retry window stays mounted and the reason is returned.
+OutcomeVoid unmount_project_view(const std::filesystem::path& mount_point);
 
 }  // namespace tribios

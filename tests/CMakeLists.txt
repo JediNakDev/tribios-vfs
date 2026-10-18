@@ -26,6 +26,7 @@ set(TRIBIOS_DESIGN_TESTS
   debian_packaging
   packaging_rpm_spec
   linux_fuse3_build
+  daemon_stop_busy_mount
 )
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
