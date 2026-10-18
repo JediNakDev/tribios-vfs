@@ -15,6 +15,7 @@
 #include "core/fault_injection.hpp"
 #include "core/paths.hpp"
 #include "core/recovery.hpp"
+#include "core/workspace_git_index.hpp"
 
 namespace tribios {
 namespace {
@@ -163,6 +164,10 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
   if (auto synced = sync_tree_durably(paths.base_dir); !synced) {
     return std::unexpected(synced.error());
   }
+  if (auto indexed = capture_base_git_index(paths.root, paths.base_dir, paths.tribios_dir);
+      !indexed) {
+    return std::unexpected(indexed.error());
+  }
 
   auto store = MetadataStore::open_database(paths.database);
   if (!store) return std::unexpected(store.error());
@@ -280,8 +285,8 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   trigger_failpoint("workspace_create.after_state_commit", paths_.tribios_dir,
                     operation_context);
 
-  // Creation never traverses the Base state: it makes one empty upper tree and
-  // some metadata, so its cost does not grow with the Project.
+  // Workspace storage never copies the Base state: it is one empty upper tree,
+  // so its cost does not grow with the Project.
   std::error_code ec;
   if (const int fault = injected_io_error("lifecycle.storage.create"); fault != 0) {
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
@@ -294,8 +299,15 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   if (sync_parent_directory(upper) != 0) return error("cannot flush Workspace storage directory");
   trigger_failpoint("workspace_create.after_storage", paths_.tribios_dir, operation_context);
 
-  auto git_file =
-      register_linked_worktree(paths_.root, branch, workspace_path, paths_.staging_dir / name);
+  // The index describes Base-state files as the mounted Workspace reports them,
+  // including the device of the mount that serves it.
+  struct stat mount_st{};
+  ::stat(paths_.mount_point.c_str(), &mount_st);
+  const WorkspaceIndexSeed index_seed{paths_.tribios_dir, paths_.base_dir,
+                                      workspace_inode_salt(name),
+                                      static_cast<std::uint32_t>(mount_st.st_dev)};
+  auto git_file = register_linked_worktree(paths_.root, branch, workspace_path,
+                                           paths_.staging_dir / name, index_seed);
   if (!git_file) {
     std::filesystem::remove_all(upper, ec);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
