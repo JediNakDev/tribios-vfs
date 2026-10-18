@@ -6,6 +6,7 @@
 #include <cctype>
 #include <chrono>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <string>
 #include <thread>
@@ -117,32 +118,33 @@ OutcomeVoid translate_verified_entries(const std::filesystem::path& index_path,
   seal_git_index(*index);
 
   const std::filesystem::path staged = index_path.string() + ".tribios";
+  std::error_code ec;
   {
     std::ofstream out(staged, std::ios::binary | std::ios::trunc);
     out << index->bytes;
-    if (!out) return error("cannot write " + staged.string());
+    if (!out) {
+      std::filesystem::remove(staged, ec);
+      return error("cannot write " + staged.string());
+    }
   }
-  std::error_code ec;
   std::filesystem::rename(staged, index_path, ec);
-  if (ec) return error("cannot publish " + index_path.string() + ": " + ec.message());
+  if (ec) {
+    const std::string reason = ec.message();
+    std::filesystem::remove(staged, ec);
+    return error("cannot publish " + index_path.string() + ": " + reason);
+  }
   return {};
 }
 
 OutcomeVoid seed_workspace_git_index(const std::filesystem::path& admin_dir,
                                      const std::filesystem::path& tribios_dir,
                                      const std::filesystem::path& base_dir,
+                                     const std::string& base_commit,
                                      const std::string& head_commit, std::uint64_t inode_salt,
                                      std::uint32_t device) {
-  const std::filesystem::path base_index = tribios_dir / kBaseGitIndexName;
-  const std::string base_commit =
-      trim_trailing_whitespace(read_whole_file(tribios_dir / kBaseGitCommitName));
-  std::error_code ec;
-  if (base_commit.size() != kSha1HexLength || !std::filesystem::is_regular_file(base_index, ec)) {
-    return error("this Project has no Base-state Git index");
-  }
-
   const std::filesystem::path index_path = admin_dir / "index";
-  std::filesystem::copy_file(base_index, index_path,
+  std::error_code ec;
+  std::filesystem::copy_file(tribios_dir / kBaseGitIndexName, index_path,
                              std::filesystem::copy_options::overwrite_existing, ec);
   if (ec) return error("cannot copy the Base-state Git index: " + ec.message());
 
@@ -203,14 +205,20 @@ OutcomeVoid populate_workspace_git_index(const std::filesystem::path& admin_dir,
                                          const std::filesystem::path& tribios_dir,
                                          const std::filesystem::path& base_dir,
                                          std::uint64_t inode_salt, std::uint32_t device) {
+  // Projects configured before the Base-state index existed, SHA-256
+  // repositories and unborn HEADs have no commit to seed from.
   const std::string head_commit = resolve_sha1_head_commit(admin_dir);
-  if (!head_commit.empty() &&
-      seed_workspace_git_index(admin_dir, tribios_dir, base_dir, head_commit, inode_salt, device)) {
-    return {};
+  const std::string base_commit =
+      trim_trailing_whitespace(read_whole_file(tribios_dir / kBaseGitCommitName));
+  if (!head_commit.empty() && base_commit.size() == kSha1HexLength) {
+    auto seeded = seed_workspace_git_index(admin_dir, tribios_dir, base_dir, base_commit,
+                                           head_commit, inode_salt, device);
+    if (seeded) return {};
+    // Correct but slow from here on, so leave a trace in the daemon log.
+    std::cerr << "tribios_daemon: Workspace Git index left unseeded: " << seeded.error() << "\n";
   }
 
-  // Unseeded: a Project configured before the Base-state index existed, a
-  // SHA-256 repository, or a seeding failure. An unborn HEAD has nothing to read.
+  // An unborn HEAD has nothing to read.
   if (!run_process_and_capture_output(
            {"git", "--git-dir", admin_dir.string(), "rev-parse", "--verify", "HEAD"})
            .ok()) {
