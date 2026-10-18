@@ -43,17 +43,20 @@ std::string request_argument(const std::vector<std::string>& request, std::size_
 }
 
 ControlReply dispatch_workspace_request(ProjectManager& manager, const std::string& verb,
-                                        const std::vector<std::string>& request) {
+                                        const std::vector<std::string>& request,
+                                        const ControlServer::ExternalChangeHandler& report_change) {
   if (verb == "ws.create") {
     auto created =
         manager.create_workspace(request_argument(request, 1), request_argument(request, 2));
     if (!created) return error_reply(created.error());
+    if (report_change) report_change(created->name, "", false);
     return ok_reply({created->name, created->branch, std::to_string(created->create_us),
                      created->path.string()});
   }
   if (verb == "ws.remove") {
     auto removed = manager.remove_workspace(request_argument(request, 1));
     if (!removed) return error_reply(removed.error());
+    if (report_change) report_change(removed->name, "", true);
     return ok_reply({removed->name, std::to_string(removed->logical_remove_us)});
   }
   if (verb == "ws.list") {
@@ -160,8 +163,28 @@ ControlReply dispatch_filesystem_mutation(WorkspaceEngine& engine, const std::st
   return error_reply("unknown filesystem request: " + verb);
 }
 
+// A failed mutation may still have changed part of its path, so every
+// mutation is reported whatever its outcome.
+void report_filesystem_mutation(const ControlServer::ExternalChangeHandler& report_change,
+                                const std::string& verb,
+                                const std::vector<std::string>& request) {
+  const std::string workspace = request_argument(request, 1);
+  const std::string path = request_argument(request, 2);
+  if (verb == "fs.rm" || verb == "fs.rmdir") {
+    report_change(workspace, path, true);
+  } else if (verb == "fs.mv") {
+    report_change(workspace, path, true);
+    report_change(workspace, request_argument(request, 3), true);
+  } else if (verb == "fs.symlink") {
+    report_change(workspace, request_argument(request, 3), false);
+  } else {
+    report_change(workspace, path, false);
+  }
+}
+
 ControlReply dispatch_filesystem_request(ProjectManager& manager, const std::string& verb,
-                                         const std::vector<std::string>& request) {
+                                         const std::vector<std::string>& request,
+                                         const ControlServer::ExternalChangeHandler& report_change) {
   auto engine = manager.find_active_workspace_engine(request_argument(request, 1));
   if (engine == nullptr) {
     return error_reply("no such active Workspace: " + request_argument(request, 1));
@@ -169,7 +192,9 @@ ControlReply dispatch_filesystem_request(ProjectManager& manager, const std::str
   const std::string path = request_argument(request, 2);
   auto query_reply = dispatch_filesystem_query(*engine, verb, path);
   if (query_reply) return *query_reply;
-  return dispatch_filesystem_mutation(*engine, verb, request, path);
+  auto reply = dispatch_filesystem_mutation(*engine, verb, request, path);
+  if (report_change) report_filesystem_mutation(report_change, verb, request);
+  return reply;
 }
 
 }  // namespace
@@ -194,9 +219,11 @@ std::vector<std::string> ControlServer::dispatch_control_request(
     return ok_reply({"stopping"});
   }
 
-  if (verb.starts_with("ws.")) return dispatch_workspace_request(manager_, verb, request);
+  if (verb.starts_with("ws.")) {
+    return dispatch_workspace_request(manager_, verb, request, external_change_handler_);
+  }
   if (verb.starts_with("fs.") || verb == "stats.upper") {
-    return dispatch_filesystem_request(manager_, verb, request);
+    return dispatch_filesystem_request(manager_, verb, request, external_change_handler_);
   }
 
   return error_reply("unknown request: " + verb);
