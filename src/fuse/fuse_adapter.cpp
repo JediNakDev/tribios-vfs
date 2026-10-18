@@ -433,6 +433,12 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
 #ifdef __APPLE__
   arguments.insert(arguments.end(),
                    {"-o", "use_ino", "-o", "volname=Tribios", "-o", "noappledouble"});
+#else
+  // libfuse 3.12 to 3.14 hand fuse_main's unlimited idle-thread default to a
+  // setter that rejects it and logs an error on every mount. Those versions
+  // run at most 10 worker threads and older ones keep 10 idle threads by
+  // default, so a limit of 10 changes no version's policy.
+  arguments.insert(arguments.end(), {"-o", "max_idle_threads=10"});
 #endif
   if (debug) arguments.push_back("-d");
   std::vector<char*> argv;
