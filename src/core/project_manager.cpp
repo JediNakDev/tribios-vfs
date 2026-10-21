@@ -178,9 +178,6 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
   if (auto stored = (*store)->save_project_record(record); !stored) {
     return std::unexpected(stored.error());
   }
-  if (auto durable = (*store)->make_metadata_durable(); !durable) {
-    return std::unexpected(durable.error());
-  }
   if (sync_directory(paths.tribios_dir) != 0 || sync_parent_directory(paths.tribios_dir) != 0) {
     return error("cannot flush Project metadata directories");
   }
@@ -344,11 +341,6 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
     store_->abandon_recovery_operation(operation.id);
     return std::unexpected(stored.error());
   }
-  // The active-state commit makes creation durable even if the daemon dies
-  // before replying, so it carries its own barrier.
-  if (auto durable = store_->make_metadata_durable(); !durable) {
-    return std::unexpected(durable.error());
-  }
   trigger_failpoint("workspace_create.after_active_commit", paths_.tribios_dir,
                     operation_context);
   if (auto completed = store_->abandon_recovery_operation(operation.id); !completed) {
@@ -407,10 +399,6 @@ Outcome<RemoveResult> ProjectManager::remove_workspace(const std::string& name) 
     store_->abandon_recovery_operation(operation.id);
     return std::unexpected(stored.error());
   }
-  // The removed state must be durable before asynchronous reclamation starts.
-  if (auto durable = store_->make_metadata_durable(); !durable) {
-    return std::unexpected(durable.error());
-  }
   trigger_failpoint("workspace_remove.after_removed_commit", paths_.tribios_dir,
                     operation_context);
   engines_.erase(name);
@@ -444,7 +432,6 @@ void ProjectManager::start_workspace_reclamation(const std::string& name,
     }
     trigger_failpoint("workspace_remove.before_reclaimed_commit", paths_.tribios_dir, context);
     if (!store_->set_workspace_state(name, WorkspaceState::Reclaimed)) return;
-    if (!store_->make_metadata_durable()) return;
     trigger_failpoint("workspace_remove.after_reclaimed_commit", paths_.tribios_dir, context);
     store_->abandon_recovery_operation(operation_id);
   });

@@ -1,4 +1,6 @@
 #include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include <cerrno>
 #include <cstdint>
@@ -39,6 +41,16 @@ std::map<std::string, DirectoryMetadata> read_directory(const std::filesystem::p
     if (name == "." || name == "..") continue;
     if (entry->d_ino == 0) throw std::runtime_error("zero inode for " + name);
     if (entry->d_type == DT_UNKNOWN) throw std::runtime_error("unknown type for " + name);
+    struct stat attributes{};
+    if (::fstatat(::dirfd(directory.get()), entry->d_name, &attributes, AT_SYMLINK_NOFOLLOW) != 0) {
+      throw std::runtime_error("cannot stat " + name);
+    }
+    if (entry->d_ino != attributes.st_ino) {
+      throw std::runtime_error("directory and stat disagree on the inode for " + name);
+    }
+    const unsigned char expected_type = S_ISREG(attributes.st_mode) ? DT_REG :
+                                       S_ISDIR(attributes.st_mode) ? DT_DIR : DT_LNK;
+    if (entry->d_type != expected_type) throw std::runtime_error("wrong type for " + name);
     if (!entries.emplace(name, DirectoryMetadata{entry->d_ino, entry->d_type}).second) {
       throw std::runtime_error("duplicate entry " + name);
     }

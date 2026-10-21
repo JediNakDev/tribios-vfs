@@ -88,10 +88,6 @@ class MetadataStore {
   OutcomeVoid finish_recovery_operation(const RecoveryOperation& operation);
   OutcomeVoid abandon_recovery_operation(std::int64_t id);
   Outcome<std::vector<RecoveryOperation>> load_recovery_operations();
-  // Makes every metadata commit so far survive a machine restart. ADR 0005
-  // requires this after a successful `fsync` and at each Workspace lifecycle
-  // commit; ordinary unsynced mutations stay atomic without it.
-  OutcomeVoid make_metadata_durable();
   OutcomeVoid validate_database_integrity();
   Outcome<std::int64_t> record_recovery_diagnostic(const std::string& project,
                                                    const std::string& message);
@@ -102,7 +98,6 @@ class MetadataStore {
 
   sqlite3* db_ = nullptr;
   std::mutex mutex_;
-  int checkpointed_total_changes_ = 0;
 };
 
 std::int64_t current_unix_time_seconds();

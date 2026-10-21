@@ -584,9 +584,6 @@ Status WorkspaceEngine::fsync_handle(int fd, bool data_only) {
       sync_parent_directory(upper_path(found->second.relative)) != 0) {
     return fail(EIO);
   }
-  // The journal entries that make this file visible must reach the disk with
-  // the data, because ADR 0005 promises a successful fsync survives a restart.
-  if (!store_.make_metadata_durable()) return fail(EIO);
   return {};
 }
 
@@ -617,7 +614,6 @@ Status WorkspaceEngine::fsync_path(std::string_view path, bool data_only, bool d
   }
   if (synced != 0) return fail(synced);
   if (layer == Layer::Upper && sync_parent_directory(visible_path) != 0) return fail(EIO);
-  if (!store_.make_metadata_durable()) return fail(EIO);
   return {};
 }
 

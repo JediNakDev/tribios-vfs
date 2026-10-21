@@ -7,7 +7,9 @@
 set(TRIBIOS_INVARIANT_TESTS
   workspace_lifecycle
   filesystem_semantics
+  control_socket
   directory_enumeration
+  directory_cache
   isolation
   deletion_and_tombstones
   restart_persistence

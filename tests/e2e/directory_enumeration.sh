@@ -17,3 +17,11 @@ start_daemon
 tribios workspace create enumeration >/dev/null
 require_mount
 "$DIRECTORY_PROBE" "$(ws_path enumeration)/bulk" "$ENTRY_COUNT"
+
+# Copy-up changes the backing inode of both a file and a Base-only parent.
+ws_write enumeration bulk/entry-0000.txt upper
+ws_write enumeration bulk/subdirectory/nested.txt upper
+# Let pre-copy-up getattr replies expire before comparing stat and readdir.
+sleep 1.1
+"$DIRECTORY_PROBE" "$(ws_path enumeration)/bulk" "$ENTRY_COUNT"
+stop_daemon
