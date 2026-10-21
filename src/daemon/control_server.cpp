@@ -231,8 +231,8 @@ OutcomeVoid ControlServer::serve() {
       buffer.append(chunk, static_cast<std::size_t>(n));
     }
     const auto reply = encode_message(dispatch_control_request(decode_message(buffer)));
-    ssize_t written = ::write(client, reply.data(), reply.size());
-    (void)written;
+    // A client that disconnects before its reply loses only that reply.
+    send_whole_message(client, reply);
     ::close(client);
   }
   ::close(listen_fd_);

@@ -44,3 +44,7 @@ It is not a security boundary, and the CLI says so whenever a policy excluded so
 A Git-tracked file can be excluded.
 The Workspace's linked worktree still has the file in its index, so `git status` inside that Workspace reports it as deleted.
 That is the honest view of a Workspace that lacks the file, and it is why excluding tracked files is a deliberate user choice rather than a default.
+
+Pattern grammar stays in tier 0.
+Filesystem capture, dry-run and explanation cases run in the design tier alongside the CLI acceptance test.
+The capture integration cases pass an already-loaded policy to the capture boundary so deletion and replacement between loading and traversal can be tested deterministically without adding a pause hook to the CLI.

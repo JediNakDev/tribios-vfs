@@ -249,7 +249,10 @@ Outcome<CapturePolicy> CapturePolicy::load_from_project(
   if (!in) return error("cannot read " + path.string());
   std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   if (in.bad()) return error("cannot read " + path.string());
-  return compile(std::move(source));
+  auto policy = compile(std::move(source));
+  if (!policy) return std::unexpected(policy.error());
+  policy->source_mode_ = st.st_mode & 07777;
+  return policy;
 }
 
 CaptureDecision CapturePolicy::decide(std::string_view relative, bool is_directory) const {

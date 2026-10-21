@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/types.h>
+
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -47,6 +49,7 @@ class CapturePolicy {
   std::string describe_pattern(const CaptureDecision& decision) const;
 
   bool present() const { return present_; }
+  mode_t source_mode() const { return source_mode_; }
   bool has_patterns() const { return !patterns_.empty(); }
   // The exact bytes that were compiled. Capture writes these, rather than
   // re-reading the file, so a Base state always holds the policy that shaped it.
@@ -54,6 +57,7 @@ class CapturePolicy {
 
  private:
   bool present_ = false;
+  mode_t source_mode_ = 0600;
   std::string source_;
   std::vector<CapturePattern> patterns_;
 };

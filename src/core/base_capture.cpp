@@ -56,7 +56,9 @@ OutcomeVoid write_compiled_policy(const CaptureWalk& walk, const std::filesystem
   out << walk.policy.source();
   out.close();
   if (!out) return error("base capture: cannot write " + target.string());
-  ::chmod(target.c_str(), mode & 07777);
+  if (::chmod(target.c_str(), mode & 07777) != 0) {
+    return error("base capture: cannot preserve policy permissions " + target.string());
+  }
   return {};
 }
 
@@ -69,7 +71,8 @@ OutcomeVoid capture_directory(const CaptureWalk& walk, const std::string& relati
 
   for (const auto& entry : entries) {
     const std::string name = entry.path().filename().string();
-    if (relative.empty() && (name == kGitDirName || name == kTribiosDirName)) continue;
+    if (relative.empty() && (name == kGitDirName || name == kTribiosDirName ||
+                             name == kCapturePolicyFileName)) continue;
 
     struct stat st{};
     if (::lstat(entry.path().c_str(), &st) != 0) continue;
@@ -79,18 +82,6 @@ OutcomeVoid capture_directory(const CaptureWalk& walk, const std::string& relati
     const std::string child = join_relative(relative, name);
     const std::filesystem::path target =
         walk.base_root == nullptr ? std::filesystem::path{} : *walk.base_root / child;
-
-    // The Base state's policy file is always the exact policy that shaped it. A
-    // file that appeared after the policy was read did not shape anything.
-    if (relative.empty() && name == kCapturePolicyFileName) {
-      if (!walk.policy.present() || !S_ISREG(st.st_mode)) continue;
-      if (auto written = write_compiled_policy(walk, target, st.st_mode); !written) {
-        return written;
-      }
-      walk.stats.bytes += static_cast<std::int64_t>(walk.policy.source().size());
-      walk.stats.entry_count++;
-      continue;
-    }
 
     const auto decided_at = std::chrono::steady_clock::now();
     const CaptureDecision decision = walk.policy.decide(child, S_ISDIR(st.st_mode));
@@ -147,6 +138,15 @@ Outcome<CaptureStats> walk_project(const std::filesystem::path& project_root,
   const auto started = std::chrono::steady_clock::now();
   CaptureStats stats;
   const CaptureWalk walk{project_root, base_dir, policy, project_st.st_dev, stats};
+  if (policy.present()) {
+    const auto target = base_dir == nullptr ? std::filesystem::path{}
+                                           : *base_dir / kCapturePolicyFileName;
+    if (auto written = write_compiled_policy(walk, target, policy.source_mode()); !written) {
+      return std::unexpected(written.error());
+    }
+    stats.bytes += static_cast<std::int64_t>(policy.source().size());
+    stats.entry_count++;
+  }
   if (auto captured = capture_directory(walk, ""); !captured) {
     return std::unexpected(captured.error());
   }

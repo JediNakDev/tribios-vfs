@@ -7,6 +7,7 @@
 set(TRIBIOS_INVARIANT_TESTS
   workspace_lifecycle
   filesystem_semantics
+  control_socket
   isolation
   deletion_and_tombstones
   restart_persistence
@@ -48,3 +49,9 @@ foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
 endforeach()
 
 add_subdirectory(unit)
+
+add_executable(tribios_capture_policy_integration_tests integration/capture_policy_test.cpp)
+target_link_libraries(tribios_capture_policy_integration_tests PRIVATE
+                      tribios_core Catch2::Catch2WithMain)
+add_test(NAME capture_policy_snapshot COMMAND tribios_capture_policy_integration_tests)
+set_tests_properties(capture_policy_snapshot PROPERTIES LABELS "design" TIMEOUT 60)
