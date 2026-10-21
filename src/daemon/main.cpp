@@ -115,7 +115,10 @@ int main(int argc, char** argv) {
   std::thread mount_thread;
   if (mount && tribios::mount_supported()) {
     glb_mount_point = paths.mount_point;
-    server.set_shutdown_unmount([&] { return tribios::unmount_project_view(paths.mount_point); });
+    server.set_shutdown_unmount([&]() -> tribios::OutcomeVoid {
+      if (!mount_is_active(paths.mount_point)) return {};
+      return tribios::unmount_project_view(paths.mount_point);
+    });
     mount_thread = std::thread([&] {
       auto mounted = tribios::run_project_mount(**manager, paths.mount_point, debug);
       if (!mounted) std::cerr << "tribios_daemon: " << mounted.error() << "\n";

@@ -14,6 +14,7 @@ After eight Workspaces ran `git status` on the 100,000-file fixture, the mount s
 Indexers, file watchers and virtual-machine file sharing hold mounts the same way.
 
 The daemon now unmounts before it agrees to a shutdown request.
+If the mount is already absent, including after a failed mount attempt, shutdown proceeds without invoking an unmount helper.
 On Linux it retries a busy unmount every 100 milliseconds for up to 5 seconds.
 If the mount is still busy, it refuses the shutdown, keeps serving, and replies with the reason, which the CLI reports.
 Retrying `daemon stop` after closing what holds the mount then works.
@@ -31,4 +32,4 @@ Nothing stops `daemon start` from launching a second daemon on the same Project 
 
 ## Consequences
 
-`tests/e2e/daemon_stop_busy_mount.sh` holds the behavior in place.
+`tests/e2e/daemon_stop_busy_mount.sh` and `tests/e2e/daemon_stop_failed_mount.sh` hold the behavior in place.

@@ -7,6 +7,7 @@
 set(TRIBIOS_INVARIANT_TESTS
   workspace_lifecycle
   filesystem_semantics
+  control_socket
   isolation
   deletion_and_tombstones
   restart_persistence
@@ -27,6 +28,7 @@ set(TRIBIOS_DESIGN_TESTS
   packaging_rpm_spec
   linux_fuse3_build
   daemon_stop_busy_mount
+  daemon_stop_failed_mount
 )
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)
