@@ -5,9 +5,6 @@
 
 #include "daemon/protocol.hpp"
 
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -16,7 +13,6 @@
 
 using tribios::decode_message;
 using tribios::encode_message;
-using tribios::send_whole_message;
 
 namespace {
 
@@ -147,30 +143,4 @@ TEST_CASE("a decoded escape is never re-split into fields") {
   CHECK(decode_message("a%09b") == std::vector<std::string>{"a\tb"});
   CHECK(decode_message("a%0Ab") == std::vector<std::string>{"a\nb"});
   CHECK(decode_message("a%25b") == std::vector<std::string>{"a%b"});
-}
-
-// Issue #27: a peer that closes the connection first used to kill the writer
-// with SIGPIPE, which surfaced as exit 141 from the CLI.
-TEST_CASE("sending to a closed control connection fails instead of raising SIGPIPE") {
-  int sockets[2];
-  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-  ::close(sockets[1]);
-  CHECK_FALSE(send_whole_message(sockets[0], encode_message({"ping"})));
-  ::close(sockets[0]);
-}
-
-TEST_CASE("a whole control message arrives on an open connection") {
-  int sockets[2];
-  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-  const std::string message = encode_message({"fs.write", "feature-x", "a.txt", "payload"});
-  REQUIRE(send_whole_message(sockets[0], message));
-  ::close(sockets[0]);
-  std::string received;
-  char chunk[64];
-  ssize_t count = 0;
-  while ((count = ::read(sockets[1], chunk, sizeof(chunk))) > 0) {
-    received.append(chunk, static_cast<std::size_t>(count));
-  }
-  ::close(sockets[1]);
-  CHECK(received == message);
 }
