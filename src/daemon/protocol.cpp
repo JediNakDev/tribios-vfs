@@ -1,5 +1,8 @@
 #include "daemon/protocol.hpp"
 
+#include <sys/socket.h>
+
+#include <cerrno>
 #include <cstdio>
 
 namespace tribios {
@@ -57,6 +60,28 @@ std::vector<std::string> decode_message(const std::string& line) {
     fields.back().push_back(c);
   }
   return fields;
+}
+
+bool send_whole_message(int socket_fd, std::string_view message) {
+  // macOS has no MSG_NOSIGNAL and suppresses SIGPIPE per socket instead.
+#ifdef SO_NOSIGPIPE
+  const int enabled = 1;
+  if (::setsockopt(socket_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0) {
+    return false;
+  }
+  constexpr int send_flags = 0;
+#else
+  constexpr int send_flags = MSG_NOSIGNAL;
+#endif
+  while (!message.empty()) {
+    const ssize_t sent = ::send(socket_fd, message.data(), message.size(), send_flags);
+    if (sent < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    message.remove_prefix(static_cast<std::size_t>(sent));
+  }
+  return true;
 }
 
 }  // namespace tribios
