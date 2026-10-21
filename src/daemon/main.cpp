@@ -61,9 +61,10 @@ bool mount_is_active(const std::filesystem::path& mount_point) {
 #endif
 }
 
+// Unmounting runs a helper process and may wait for a busy mount, so it is
+// left to main once the server stops.
 void stop_daemon_on_signal(int) {
   if (glb_control_server != nullptr) glb_control_server->stop();
-  if (!glb_mount_point.empty()) tribios::request_unmount(glb_mount_point);
 }
 
 }  // namespace
@@ -92,14 +93,9 @@ int main(int argc, char** argv) {
 
   const auto startup_paths = tribios::ProjectPaths::from_project_root(project);
   if (mount && mount_is_active(startup_paths.mount_point)) {
-    tribios::request_unmount(startup_paths.mount_point);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (mount_is_active(startup_paths.mount_point) &&
-           std::chrono::steady_clock::now() < deadline) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    }
-    if (mount_is_active(startup_paths.mount_point)) {
-      std::cerr << "tribios_daemon: cannot remove the stale Project mount before recovery\n";
+    if (auto unmounted = tribios::unmount_project_view(startup_paths.mount_point); !unmounted) {
+      std::cerr << "tribios_daemon: cannot remove the stale Project mount before recovery: "
+                << unmounted.error() << "\n";
       return 1;
     }
   }
@@ -119,6 +115,10 @@ int main(int argc, char** argv) {
   std::thread mount_thread;
   if (mount && tribios::mount_supported()) {
     glb_mount_point = paths.mount_point;
+    server.set_shutdown_unmount([&]() -> tribios::OutcomeVoid {
+      if (!mount_is_active(paths.mount_point)) return {};
+      return tribios::unmount_project_view(paths.mount_point);
+    });
     mount_thread = std::thread([&] {
       auto mounted = tribios::run_project_mount(**manager, paths.mount_point, debug);
       if (!mounted) std::cerr << "tribios_daemon: " << mounted.error() << "\n";
@@ -135,7 +135,15 @@ int main(int argc, char** argv) {
 
   std::cerr << "tribios_daemon: serving " << paths.root << " on " << paths.socket << "\n";
   auto served = server.serve();
-  if (!glb_mount_point.empty()) tribios::request_unmount(glb_mount_point);
+  // A shutdown request has already unmounted. A signal stops the server
+  // without that step, and no caller is left to refuse, so wait until the
+  // mount can be released.
+  while (!glb_mount_point.empty() && mount_is_active(glb_mount_point)) {
+    auto unmounted = tribios::unmount_project_view(glb_mount_point);
+    if (unmounted) break;
+    std::cerr << "tribios_daemon: " << unmounted.error() << "\n";
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
   if (mount_thread.joinable()) mount_thread.join();
   // Workspace data and metadata are preserved across a clean shutdown.
   (*manager)->wait_for_reclamation();

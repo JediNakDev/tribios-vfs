@@ -23,6 +23,6 @@ OutcomeVoid run_project_mount(ProjectManager&, const std::filesystem::path&, boo
   return error(mount_unavailable_reason());
 }
 
-void request_unmount(const std::filesystem::path&) {}
+OutcomeVoid unmount_project_view(const std::filesystem::path&) { return {}; }
 
 }  // namespace tribios
