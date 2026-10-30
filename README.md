@@ -104,3 +104,12 @@ tribios daemon stop
 
 Workspace removal returns after the Workspace disappears.
 `tribios workspace wait-reclaim` waits for its storage to be reclaimed in the background and is optional.
+
+## Agent skill
+
+`skills/tribios-parallel-workspaces` is an agent skill that lets a coding agent set up and clean up one Workspace per parallel agent.
+Copy it into your agent's skills directory, for example:
+
+```sh
+cp -R skills/tribios-parallel-workspaces ~/.claude/skills/
+```
