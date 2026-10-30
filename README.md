@@ -45,6 +45,15 @@ sudo dnf copr enable jedinakdev/tribios-vfs
 sudo dnf install tribios-vfs
 ```
 
+**Amazon Linux 2023**
+
+```sh
+version=0.0.1
+sudo dnf install "https://github.com/JediNakDev/tribios-vfs/releases/download/v$version/tribios-vfs-$version-1.amzn2023.$(uname -m).rpm"
+```
+
+`docs/install/amazon-linux-2023.md` explains why this is a release asset rather than a repository.
+
 **Arch Linux**
 
 ```sh

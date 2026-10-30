@@ -51,7 +51,7 @@ Tribios publishes no C++ SDK and no CMake package config.
 `tribios` locates `tribios_daemon` relative to the running executable, so an installed tree can be relocated after staging.
 Setting `TRIBIOS_DAEMON` overrides the lookup.
 
-The build requires CMake 3.24 or newer, a C++23 compiler, `pkg-config`, and SQLite 3.
+The build requires CMake 3.22 or newer, a C++23 compiler, `pkg-config`, and SQLite 3.
 Mounted builds use `libfuse3-dev` and `fuse3` on Linux, or the macFUSE cask on macOS.
 Configuring with `-DTRIBIOS_BUILD_TESTS=OFF` skips the test suite, and with it the Catch2 fetch that would otherwise need network access at configure time.
 Packaging recipes building in an isolated chroot use it; `packaging/aur/README.md` is the worked example.
