@@ -18,6 +18,7 @@ add_executable(tribios_unit_tests
   base_capture_exclusion_test.cpp
   capture_policy_test.cpp
   tombstone_resolution_test.cpp
+  git_index_test.cpp
 )
 target_link_libraries(tribios_unit_tests PRIVATE tribios_control tribios_core
                                                  Catch2::Catch2WithMain)

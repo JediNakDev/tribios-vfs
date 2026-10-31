@@ -27,6 +27,7 @@ set(TRIBIOS_DESIGN_TESTS
   capture_policy
   unsupported_operations
   git_workflow
+  workspace_git_index
   end_to_end_build
   packaging_install
   debian_packaging

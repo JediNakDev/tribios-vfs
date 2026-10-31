@@ -18,6 +18,9 @@ add_library(tribios_core STATIC
   src/core/capture_policy.cpp
   src/core/base_capture.cpp
   src/core/workspace_engine.cpp
+  src/core/sha1.cpp
+  src/core/git_index.cpp
+  src/core/workspace_git_index.cpp
   src/core/git_worktree.cpp
   src/core/project_manager.cpp
 )

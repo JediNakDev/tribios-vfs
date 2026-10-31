@@ -28,25 +28,6 @@ Attr attr_from_stat(const struct stat& st, std::uint64_t ino, bool from_upper) {
               st.st_ctime, from_upper};
 }
 
-std::uint64_t fnv1a_hash(std::string_view text) {
-  std::uint64_t hash = 14695981039346656037ULL;
-  for (const unsigned char byte : text) {
-    hash ^= byte;
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
-// The splitmix64 finalizer: it spreads the salted backing inode across the
-// whole 64-bit range so that neighbouring inodes do not collide after mixing.
-std::uint64_t mix_bits(std::uint64_t value) {
-  value ^= value >> 30;
-  value *= 0xbf58476d1ce4e5b9ULL;
-  value ^= value >> 27;
-  value *= 0x94d049bb133111ebULL;
-  return value ^ (value >> 31);
-}
-
 int last_errno() { return errno != 0 ? errno : EIO; }
 
 struct DirectoryCloser {
@@ -99,10 +80,33 @@ int sync_entry_tree(const std::filesystem::path& path) {
 
 }  // namespace
 
+std::uint64_t workspace_inode_salt(std::string_view workspace) {
+  std::uint64_t hash = 14695981039346656037ULL;  // FNV-1a
+  for (const unsigned char byte : workspace) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+// The splitmix64 finalizer spreads the salted backing inode across the whole
+// 64-bit range so that neighbouring inodes do not collide after mixing. Zero is
+// reserved: a directory entry carrying inode zero reads as a deleted slot, and
+// callers treat a zero inode as "unknown".
+std::uint64_t salted_workspace_inode(std::uint64_t salt, std::uint64_t backing_inode) {
+  std::uint64_t value = backing_inode + salt;
+  value ^= value >> 30;
+  value *= 0xbf58476d1ce4e5b9ULL;
+  value ^= value >> 27;
+  value *= 0x94d049bb133111ebULL;
+  value ^= value >> 31;
+  return value == 0 ? 1 : value;
+}
+
 WorkspaceEngine::WorkspaceEngine(std::string workspace, std::filesystem::path base_dir,
                                  std::filesystem::path upper_dir, MetadataStore& store)
     : workspace_(std::move(workspace)),
-      inode_salt_(fnv1a_hash(workspace_)),
+      inode_salt_(workspace_inode_salt(workspace_)),
       base_dir_(std::move(base_dir)),
       upper_dir_(std::move(upper_dir)),
       store_(store) {
@@ -197,11 +201,8 @@ Result<Attr> WorkspaceEngine::getattr(std::string_view path) {
   return attr_from_stat(st, workspace_inode_for(st), layer == Layer::Upper);
 }
 
-// Zero is reserved: a directory entry carrying inode zero reads as a deleted
-// slot, and callers treat a zero inode as "unknown".
 std::uint64_t WorkspaceEngine::workspace_inode_for(std::uint64_t backing_inode) const {
-  const std::uint64_t mixed = mix_bits(backing_inode + inode_salt_);
-  return mixed == 0 ? 1 : mixed;
+  return salted_workspace_inode(inode_salt_, backing_inode);
 }
 
 std::uint64_t WorkspaceEngine::workspace_inode_for(const struct stat& backing) const {
