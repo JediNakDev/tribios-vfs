@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(tribios_vfs VERSION 0.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -15,8 +15,12 @@ add_library(tribios_core STATIC
   src/core/metadata_store.cpp
   src/core/recovery.cpp
   src/core/fault_injection.cpp
+  src/core/capture_policy.cpp
   src/core/base_capture.cpp
   src/core/workspace_engine.cpp
+  src/core/sha1.cpp
+  src/core/git_index.cpp
+  src/core/workspace_git_index.cpp
   src/core/git_worktree.cpp
   src/core/project_manager.cpp
 )

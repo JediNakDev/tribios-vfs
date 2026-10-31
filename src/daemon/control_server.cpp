@@ -9,6 +9,7 @@
 #include <optional>
 #include <sstream>
 
+#include "core/paths.hpp"
 #include "daemon/protocol.hpp"
 
 namespace tribios {
@@ -43,17 +44,20 @@ std::string request_argument(const std::vector<std::string>& request, std::size_
 }
 
 ControlReply dispatch_workspace_request(ProjectManager& manager, const std::string& verb,
-                                        const std::vector<std::string>& request) {
+                                        const std::vector<std::string>& request,
+                                        const ControlServer::ExternalChangeHandler& report_change) {
   if (verb == "ws.create") {
     auto created =
         manager.create_workspace(request_argument(request, 1), request_argument(request, 2));
     if (!created) return error_reply(created.error());
+    if (report_change) report_change(created->name, "", false);
     return ok_reply({created->name, created->branch, std::to_string(created->create_us),
                      created->path.string()});
   }
   if (verb == "ws.remove") {
     auto removed = manager.remove_workspace(request_argument(request, 1));
     if (!removed) return error_reply(removed.error());
+    if (report_change) report_change(removed->name, "", true);
     return ok_reply({removed->name, std::to_string(removed->logical_remove_us)});
   }
   if (verb == "ws.list") {
@@ -160,8 +164,44 @@ ControlReply dispatch_filesystem_mutation(WorkspaceEngine& engine, const std::st
   return error_reply("unknown filesystem request: " + verb);
 }
 
+std::optional<std::uint64_t> find_path_inode(WorkspaceEngine& engine, const std::string& path) {
+  auto attributes = engine.getattr(path);
+  if (!attributes) return std::nullopt;
+  return attributes->ino;
+}
+
+// A failed mutation may still have changed part of its path, so every
+// mutation is reported whatever its outcome. A directory entry is dropped only
+// when what the name refers to changed, because dropping a live directory's
+// entry detaches every shell whose working directory is inside it. A name that
+// kept its inode (a failed rmdir, a rename onto itself) keeps its entry.
+void report_filesystem_mutation(const ControlServer::ExternalChangeHandler& report_change,
+                                WorkspaceEngine& engine, const std::string& verb,
+                                const std::vector<std::string>& request,
+                                std::optional<std::uint64_t> inode_before_of_path,
+                                std::optional<std::uint64_t> inode_before_of_second_path) {
+  const std::string workspace = request_argument(request, 1);
+  const std::string path = request_argument(request, 2);
+  if (verb == "fs.rm" || verb == "fs.rmdir") {
+    report_change(workspace, path, find_path_inode(engine, path) != inode_before_of_path);
+  } else if (verb == "fs.mv") {
+    const std::string destination = request_argument(request, 3);
+    const bool renamed_onto_itself = normalize_relative(path) == normalize_relative(destination);
+    report_change(workspace, path,
+                  !renamed_onto_itself && find_path_inode(engine, path) != inode_before_of_path);
+    report_change(workspace, destination,
+                  !renamed_onto_itself &&
+                      find_path_inode(engine, destination) != inode_before_of_second_path);
+  } else if (verb == "fs.symlink") {
+    report_change(workspace, request_argument(request, 3), false);
+  } else {
+    report_change(workspace, path, false);
+  }
+}
+
 ControlReply dispatch_filesystem_request(ProjectManager& manager, const std::string& verb,
-                                         const std::vector<std::string>& request) {
+                                         const std::vector<std::string>& request,
+                                         const ControlServer::ExternalChangeHandler& report_change) {
   auto engine = manager.find_active_workspace_engine(request_argument(request, 1));
   if (engine == nullptr) {
     return error_reply("no such active Workspace: " + request_argument(request, 1));
@@ -169,7 +209,21 @@ ControlReply dispatch_filesystem_request(ProjectManager& manager, const std::str
   const std::string path = request_argument(request, 2);
   auto query_reply = dispatch_filesystem_query(*engine, verb, path);
   if (query_reply) return *query_reply;
-  return dispatch_filesystem_mutation(*engine, verb, request, path);
+  const bool may_unlink_names = verb == "fs.rm" || verb == "fs.rmdir" || verb == "fs.mv";
+  std::optional<std::uint64_t> inode_before_of_path;
+  std::optional<std::uint64_t> inode_before_of_second_path;
+  if (report_change && may_unlink_names) {
+    inode_before_of_path = find_path_inode(*engine, path);
+    if (verb == "fs.mv") {
+      inode_before_of_second_path = find_path_inode(*engine, request_argument(request, 3));
+    }
+  }
+  auto reply = dispatch_filesystem_mutation(*engine, verb, request, path);
+  if (report_change) {
+    report_filesystem_mutation(report_change, *engine, verb, request, inode_before_of_path,
+                               inode_before_of_second_path);
+  }
+  return reply;
 }
 
 }  // namespace
@@ -199,9 +253,11 @@ std::vector<std::string> ControlServer::dispatch_control_request(
     return ok_reply({"stopping"});
   }
 
-  if (verb.starts_with("ws.")) return dispatch_workspace_request(manager_, verb, request);
+  if (verb.starts_with("ws.")) {
+    return dispatch_workspace_request(manager_, verb, request, external_change_handler_);
+  }
   if (verb.starts_with("fs.") || verb == "stats.upper") {
-    return dispatch_filesystem_request(manager_, verb, request);
+    return dispatch_filesystem_request(manager_, verb, request, external_change_handler_);
   }
 
   return error_reply("unknown request: " + verb);

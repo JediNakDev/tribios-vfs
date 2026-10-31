@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <system_error>
 
 #include "core/paths.hpp"
@@ -19,71 +20,156 @@ const char* const kSecretsWarning =
 
 namespace {
 
-OutcomeVoid capture_directory(const std::filesystem::path& source_root,
-                              const std::filesystem::path& base_root, const std::string& relative,
-                              dev_t project_device, CaptureStats& stats) {
-  const std::filesystem::path source = relative.empty() ? source_root : source_root / relative;
+struct CaptureWalk {
+  const std::filesystem::path& source_root;
+  const std::filesystem::path* base_root;  // null for a dry run
+  const CapturePolicy& policy;
+  dev_t project_device;
+  CaptureStats& stats;
+};
+
+bool is_capturable_type(mode_t mode) {
+  return S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode);
+}
+
+// Counts what an excluded entry would have contributed, under the same type and
+// nested-mount rules the capture applies. An unreadable excluded directory
+// counts as itself only: excluding it is how a user keeps capture away from it.
+void count_excluded_tree(const std::filesystem::path& path, const struct stat& st,
+                         dev_t project_device, CaptureStats& stats) {
+  stats.excluded_entry_count++;
+  if (S_ISREG(st.st_mode)) stats.excluded_bytes += st.st_size;
+  if (!S_ISDIR(st.st_mode)) return;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(path, ec)) {
+    struct stat child {};
+    if (::lstat(entry.path().c_str(), &child) != 0) continue;
+    if (child.st_dev != project_device || !is_capturable_type(child.st_mode)) continue;
+    count_excluded_tree(entry.path(), child, project_device, stats);
+  }
+}
+
+OutcomeVoid write_compiled_policy(const CaptureWalk& walk, const std::filesystem::path& target,
+                                  mode_t mode) {
+  if (walk.base_root == nullptr) return {};
+  std::ofstream out(target, std::ios::binary | std::ios::trunc);
+  out << walk.policy.source();
+  out.close();
+  if (!out) return error("base capture: cannot write " + target.string());
+  if (::chmod(target.c_str(), mode & 07777) != 0) {
+    return error("base capture: cannot preserve policy permissions " + target.string());
+  }
+  return {};
+}
+
+OutcomeVoid capture_directory(const CaptureWalk& walk, const std::string& relative) {
+  const std::filesystem::path source =
+      relative.empty() ? walk.source_root : walk.source_root / relative;
   std::error_code ec;
   std::filesystem::directory_iterator entries(source, std::filesystem::directory_options::none, ec);
   if (ec) return error("base capture: cannot read " + source.string() + ": " + ec.message());
 
   for (const auto& entry : entries) {
     const std::string name = entry.path().filename().string();
-    if (relative.empty() && (name == kGitDirName || name == kTribiosDirName)) continue;
+    if (relative.empty() && (name == kGitDirName || name == kTribiosDirName ||
+                             name == kCapturePolicyFileName)) continue;
 
     struct stat st{};
     if (::lstat(entry.path().c_str(), &st) != 0) continue;
-    if (st.st_dev != project_device) continue;  // nested mount
+    if (st.st_dev != walk.project_device) continue;  // nested mount
+    if (!is_capturable_type(st.st_mode)) continue;   // special file
 
     const std::string child = join_relative(relative, name);
-    const std::filesystem::path target = base_root / child;
+    const std::filesystem::path target =
+        walk.base_root == nullptr ? std::filesystem::path{} : *walk.base_root / child;
+
+    const auto decided_at = std::chrono::steady_clock::now();
+    const CaptureDecision decision = walk.policy.decide(child, S_ISDIR(st.st_mode));
+    walk.stats.policy_evaluation_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - decided_at)
+                                           .count();
+    if (decision.excluded) {
+      count_excluded_tree(entry.path(), st, walk.project_device, walk.stats);
+      walk.stats.exclusions.push_back(
+          CaptureExclusion{child, S_ISDIR(st.st_mode), walk.policy.describe_pattern(decision)});
+      continue;
+    }
 
     if (S_ISLNK(st.st_mode)) {
-      std::filesystem::create_symlink(std::filesystem::read_symlink(entry.path(), ec), target, ec);
-      if (ec) return error("base capture: cannot recreate symlink " + child);
+      if (walk.base_root != nullptr) {
+        std::filesystem::create_symlink(std::filesystem::read_symlink(entry.path(), ec), target,
+                                        ec);
+        if (ec) return error("base capture: cannot recreate symlink " + child);
+      }
     } else if (S_ISDIR(st.st_mode)) {
-      std::filesystem::create_directories(target, ec);
-      if (ec) return error("base capture: cannot create " + target.string());
-      ::chmod(target.c_str(), st.st_mode & 07777);
-      auto captured = capture_directory(source_root, base_root, child, project_device, stats);
-      if (!captured) return captured;
-    } else if (S_ISREG(st.st_mode)) {
-      std::filesystem::copy_file(entry.path(), target,
-                                 std::filesystem::copy_options::overwrite_existing, ec);
-      if (ec) return error("base capture: cannot copy " + child + ": " + ec.message());
-      ::chmod(target.c_str(), st.st_mode & 07777);
-      stats.bytes += st.st_size;
+      if (walk.base_root != nullptr) {
+        std::filesystem::create_directories(target, ec);
+        if (ec) return error("base capture: cannot create " + target.string());
+        ::chmod(target.c_str(), st.st_mode & 07777);
+      }
+      if (auto captured = capture_directory(walk, child); !captured) return captured;
     } else {
-      continue;  // special file
+      if (walk.base_root != nullptr) {
+        std::filesystem::copy_file(entry.path(), target,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) return error("base capture: cannot copy " + child + ": " + ec.message());
+        ::chmod(target.c_str(), st.st_mode & 07777);
+      }
+      walk.stats.bytes += st.st_size;
     }
-    stats.entry_count++;
+    walk.stats.entry_count++;
   }
   return {};
+}
+
+Outcome<CaptureStats> walk_project(const std::filesystem::path& project_root,
+                                   const std::filesystem::path* base_dir,
+                                   const CapturePolicy& policy) {
+  struct stat project_st{};
+  if (::lstat(project_root.c_str(), &project_st) != 0 || !S_ISDIR(project_st.st_mode)) {
+    return error("base capture: " + project_root.string() + " is not a directory");
+  }
+  if (base_dir != nullptr) {
+    std::error_code ec;
+    std::filesystem::create_directories(*base_dir, ec);
+    if (ec) return error("base capture: cannot create " + base_dir->string());
+  }
+
+  const auto started = std::chrono::steady_clock::now();
+  CaptureStats stats;
+  const CaptureWalk walk{project_root, base_dir, policy, project_st.st_dev, stats};
+  if (policy.present()) {
+    const auto target = base_dir == nullptr ? std::filesystem::path{}
+                                           : *base_dir / kCapturePolicyFileName;
+    if (auto written = write_compiled_policy(walk, target, policy.source_mode()); !written) {
+      return std::unexpected(written.error());
+    }
+    stats.bytes += static_cast<std::int64_t>(policy.source().size());
+    stats.entry_count++;
+  }
+  if (auto captured = capture_directory(walk, ""); !captured) {
+    return std::unexpected(captured.error());
+  }
+  stats.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - started)
+                          .count();
+  return stats;
 }
 
 }  // namespace
 
 Outcome<CaptureStats> capture_base_state(const std::filesystem::path& project_root,
-                                         const std::filesystem::path& base_dir) {
-  struct stat project_st{};
-  if (::lstat(project_root.c_str(), &project_st) != 0 || !S_ISDIR(project_st.st_mode)) {
-    return error("base capture: " + project_root.string() + " is not a directory");
-  }
-  std::error_code ec;
-  std::filesystem::create_directories(base_dir, ec);
-  if (ec) return error("base capture: cannot create " + base_dir.string());
-
-  const auto started = std::chrono::steady_clock::now();
-  CaptureStats stats;
-  auto captured = capture_directory(project_root, base_dir, "", project_st.st_dev, stats);
-  if (!captured) return std::unexpected(captured.error());
-  stats.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - started)
-                          .count();
+                                         const std::filesystem::path& base_dir,
+                                         const CapturePolicy& policy) {
   // Nothing writes to the Base state again and the Project source is never read
   // after this point, so later Project changes cannot reach existing
   // Workspaces.
-  return stats;
+  return walk_project(project_root, &base_dir, policy);
+}
+
+Outcome<CaptureStats> plan_base_state_capture(const std::filesystem::path& project_root,
+                                              const CapturePolicy& policy) {
+  return walk_project(project_root, nullptr, policy);
 }
 
 }  // namespace tribios

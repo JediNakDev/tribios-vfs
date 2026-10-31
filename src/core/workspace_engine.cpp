@@ -1,5 +1,6 @@
 #include "core/workspace_engine.hpp"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <system_error>
 
 #include "core/fault_injection.hpp"
@@ -26,26 +28,36 @@ Attr attr_from_stat(const struct stat& st, std::uint64_t ino, bool from_upper) {
               st.st_ctime, from_upper};
 }
 
-std::uint64_t fnv1a_hash(std::string_view text) {
-  std::uint64_t hash = 14695981039346656037ULL;
-  for (const unsigned char byte : text) {
-    hash ^= byte;
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
-// The splitmix64 finalizer: it spreads the salted backing inode across the
-// whole 64-bit range so that neighbouring inodes do not collide after mixing.
-std::uint64_t mix_bits(std::uint64_t value) {
-  value ^= value >> 30;
-  value *= 0xbf58476d1ce4e5b9ULL;
-  value ^= value >> 27;
-  value *= 0x94d049bb133111ebULL;
-  return value ^ (value >> 31);
-}
-
 int last_errno() { return errno != 0 ? errno : EIO; }
+
+struct DirectoryCloser {
+  void operator()(DIR* directory) const { ::closedir(directory); }
+};
+
+mode_t mode_for_directory_entry_type(unsigned char type) {
+  switch (type) {
+    case DT_REG:
+      return S_IFREG;
+    case DT_DIR:
+      return S_IFDIR;
+    case DT_LNK:
+      return S_IFLNK;
+    case DT_CHR:
+      return S_IFCHR;
+    case DT_BLK:
+      return S_IFBLK;
+    case DT_FIFO:
+      return S_IFIFO;
+    case DT_SOCK:
+      return S_IFSOCK;
+#if defined(DT_WHT) && defined(S_IFWHT)
+    case DT_WHT:
+      return S_IFWHT;
+#endif
+    default:
+      return 0;
+  }
+}
 
 bool path_exists_without_following_symlinks(const std::filesystem::path& path) {
   struct stat st {};
@@ -68,10 +80,33 @@ int sync_entry_tree(const std::filesystem::path& path) {
 
 }  // namespace
 
+std::uint64_t workspace_inode_salt(std::string_view workspace) {
+  std::uint64_t hash = 14695981039346656037ULL;  // FNV-1a
+  for (const unsigned char byte : workspace) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+// The splitmix64 finalizer spreads the salted backing inode across the whole
+// 64-bit range so that neighbouring inodes do not collide after mixing. Zero is
+// reserved: a directory entry carrying inode zero reads as a deleted slot, and
+// callers treat a zero inode as "unknown".
+std::uint64_t salted_workspace_inode(std::uint64_t salt, std::uint64_t backing_inode) {
+  std::uint64_t value = backing_inode + salt;
+  value ^= value >> 30;
+  value *= 0xbf58476d1ce4e5b9ULL;
+  value ^= value >> 27;
+  value *= 0x94d049bb133111ebULL;
+  value ^= value >> 31;
+  return value == 0 ? 1 : value;
+}
+
 WorkspaceEngine::WorkspaceEngine(std::string workspace, std::filesystem::path base_dir,
                                  std::filesystem::path upper_dir, MetadataStore& store)
     : workspace_(std::move(workspace)),
-      inode_salt_(fnv1a_hash(workspace_)),
+      inode_salt_(workspace_inode_salt(workspace_)),
       base_dir_(std::move(base_dir)),
       upper_dir_(std::move(upper_dir)),
       store_(store) {
@@ -116,26 +151,44 @@ WorkspaceEngine::Layer WorkspaceEngine::find_visible_entry_layer(const std::stri
 
 void WorkspaceEngine::merge_visible_directory_entries(
     const std::string& relative, std::map<std::string, DirEntry>& entries) const {
-  std::error_code ec;
-  if (base_is_visible(relative)) {
-    for (const auto& entry : std::filesystem::directory_iterator(
-             base_path(relative), std::filesystem::directory_options::none, ec)) {
-      const std::string name = entry.path().filename().string();
-      struct stat st{};
-      if (tombstones_.contains(join_relative(relative, name)) || !lstat_path(entry.path(), st)) {
-        continue;
+  const auto merge_directory = [&](const std::filesystem::path& path, bool filter_tombstones) {
+    std::unique_ptr<DIR, DirectoryCloser> directory(::opendir(path.c_str()));
+    if (!directory) return;
+    const int directory_fd = ::dirfd(directory.get());
+    while (const dirent* entry = ::readdir(directory.get())) {
+      const std::string name = entry->d_name;
+      if (name == "." || name == "..") continue;
+      if (filter_tombstones && tombstones_.contains(join_relative(relative, name))) continue;
+
+      std::uint64_t backing_inode = entry->d_ino;
+      mode_t mode = mode_for_directory_entry_type(entry->d_type);
+      if (backing_inode == 0 || entry->d_type == DT_UNKNOWN) {
+        struct stat backing{};
+        if (::fstatat(directory_fd, entry->d_name, &backing, AT_SYMLINK_NOFOLLOW) != 0) continue;
+        backing_inode = static_cast<std::uint64_t>(backing.st_ino);
+        mode = backing.st_mode;
       }
-      entries[name] = DirEntry{name, workspace_inode_for(st), st.st_mode};
+      entries[name] = DirEntry{name, workspace_inode_for(backing_inode), mode};
     }
-  }
-  ec.clear();
-  for (const auto& entry : std::filesystem::directory_iterator(
-           upper_path(relative), std::filesystem::directory_options::none, ec)) {
-    const std::string name = entry.path().filename().string();
-    struct stat st{};
-    if (lstat_path(entry.path(), st)) {
-      entries[name] = DirEntry{name, workspace_inode_for(st), st.st_mode};
-    }
+  };
+
+  if (base_is_visible(relative)) merge_directory(base_path(relative), true);
+  merge_directory(upper_path(relative), false);
+}
+
+// A mutation of `relative` can change its parent's membership and the inode the
+// parent's listing reports for it, since copy-up moves the entry to a new
+// backing file. Its own listing and every listing beneath it go too, because a
+// rename or removal moves or hides that whole subtree.
+void WorkspaceEngine::forget_cached_directory_entries(const std::string& relative) {
+  std::lock_guard lock(directory_entries_cache_mutex_);
+  directory_entries_cache_.erase(parent_of(relative));
+  directory_entries_cache_.erase(relative);
+  const std::string descendant_prefix = relative + "/";
+  auto cached = directory_entries_cache_.lower_bound(descendant_prefix);
+  while (cached != directory_entries_cache_.end() &&
+         cached->first.starts_with(descendant_prefix)) {
+    cached = directory_entries_cache_.erase(cached);
   }
 }
 
@@ -148,17 +201,22 @@ Result<Attr> WorkspaceEngine::getattr(std::string_view path) {
   return attr_from_stat(st, workspace_inode_for(st), layer == Layer::Upper);
 }
 
-// Zero is reserved: a directory entry carrying inode zero reads as a deleted
-// slot, and callers treat a zero inode as "unknown".
+std::uint64_t WorkspaceEngine::workspace_inode_for(std::uint64_t backing_inode) const {
+  return salted_workspace_inode(inode_salt_, backing_inode);
+}
+
 std::uint64_t WorkspaceEngine::workspace_inode_for(const struct stat& backing) const {
-  const std::uint64_t mixed =
-      mix_bits(static_cast<std::uint64_t>(backing.st_ino) + inode_salt_);
-  return mixed == 0 ? 1 : mixed;
+  return workspace_inode_for(static_cast<std::uint64_t>(backing.st_ino));
 }
 
 Result<std::vector<DirEntry>> WorkspaceEngine::readdir(std::string_view path) {
   const std::string relative = normalize_relative(path);
   std::shared_lock lock(mutex_);
+  {
+    std::lock_guard cache_lock(directory_entries_cache_mutex_);
+    const auto cached = directory_entries_cache_.find(relative);
+    if (cached != directory_entries_cache_.end()) return cached->second;
+  }
   struct stat st{};
   if (find_visible_entry_layer(relative, st) == Layer::Missing) return fail(ENOENT);
   if (!S_ISDIR(st.st_mode)) return fail(ENOTDIR);
@@ -168,7 +226,8 @@ Result<std::vector<DirEntry>> WorkspaceEngine::readdir(std::string_view path) {
   std::vector<DirEntry> out;
   out.reserve(merged.size());
   for (auto& [name, entry] : merged) out.push_back(entry);
-  return out;
+  std::lock_guard cache_lock(directory_entries_cache_mutex_);
+  return directory_entries_cache_.try_emplace(relative, std::move(out)).first->second;
 }
 
 Result<std::string> WorkspaceEngine::readlink(std::string_view path) {
@@ -200,6 +259,7 @@ Status WorkspaceEngine::create_missing_upper_parent_directories(const std::strin
     }
     if (!base_is_visible(dir) || !lstat_path(base_path(dir), st)) return fail(ENOENT);
     if (!S_ISDIR(st.st_mode)) return fail(ENOTDIR);
+    forget_cached_directory_entries(dir);
     if (::mkdir(upper_path(dir).c_str(), st.st_mode & 07777) != 0 && errno != EEXIST) {
       return fail(last_errno());
     }
@@ -250,6 +310,8 @@ Status WorkspaceEngine::publish_staged_operation(
     RecoveryOperation operation,
     const std::function<Status(const std::filesystem::path&)>& prepare_stage) {
   if (const int fault = injected_io_error("journal.write"); fault != 0) return fail(fault);
+  forget_cached_directory_entries(operation.path);
+  if (operation.kind == "rename") forget_cached_directory_entries(operation.target);
   auto operation_id = store_.begin_recovery_operation(operation);
   if (!operation_id) return fail(EIO);
   operation.id = *operation_id;
@@ -358,6 +420,7 @@ Status WorkspaceEngine::remove_visible_entry_atomically(const std::string& kind,
   operation.path = relative;
   operation.add_path_tombstone =
       base_is_visible(relative) && lstat_path(base_path(relative), base_stat);
+  forget_cached_directory_entries(relative);
   auto operation_id = store_.begin_recovery_operation(operation);
   if (!operation_id) return fail(EIO);
   operation.id = *operation_id;

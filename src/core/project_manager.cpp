@@ -15,6 +15,7 @@
 #include "core/fault_injection.hpp"
 #include "core/paths.hpp"
 #include "core/recovery.hpp"
+#include "core/workspace_git_index.hpp"
 
 namespace tribios {
 namespace {
@@ -148,6 +149,11 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
   if (std::filesystem::exists(paths.database, ec) && !force) {
     return error("project is already configured; the Base state is captured once");
   }
+  // The whole policy is validated before anything is written or, with
+  // --force, removed, so a malformed policy never costs the existing Base
+  // state or leaves a partial one behind.
+  auto policy = CapturePolicy::load_from_project(paths.root);
+  if (!policy) return std::unexpected(policy.error());
   if (force) std::filesystem::remove_all(paths.tribios_dir, ec);
   for (const auto& dir :
        {paths.tribios_dir, paths.workspaces_dir, paths.staging_dir, paths.mount_point}) {
@@ -158,10 +164,14 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
     return std::unexpected(durable.error());
   }
 
-  auto captured = capture_base_state(paths.root, paths.base_dir);
+  auto captured = capture_base_state(paths.root, paths.base_dir, *policy);
   if (!captured) return std::unexpected(captured.error());
   if (auto synced = sync_tree_durably(paths.base_dir); !synced) {
     return std::unexpected(synced.error());
+  }
+  if (auto indexed = capture_base_git_index(paths.root, paths.base_dir, paths.tribios_dir);
+      !indexed) {
+    return std::unexpected(indexed.error());
   }
 
   auto store = MetadataStore::open_database(paths.database);
@@ -280,8 +290,8 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   trigger_failpoint("workspace_create.after_state_commit", paths_.tribios_dir,
                     operation_context);
 
-  // Creation never traverses the Base state: it makes one empty upper tree and
-  // some metadata, so its cost does not grow with the Project.
+  // Workspace storage never copies the Base state: it is one empty upper tree,
+  // so its cost does not grow with the Project.
   std::error_code ec;
   if (const int fault = injected_io_error("lifecycle.storage.create"); fault != 0) {
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);
@@ -294,8 +304,15 @@ Outcome<CreateResult> ProjectManager::create_workspace(const std::string& name,
   if (sync_parent_directory(upper) != 0) return error("cannot flush Workspace storage directory");
   trigger_failpoint("workspace_create.after_storage", paths_.tribios_dir, operation_context);
 
-  auto git_file =
-      register_linked_worktree(paths_.root, branch, workspace_path, paths_.staging_dir / name);
+  // The index describes Base-state files as the mounted Workspace reports them,
+  // including the device of the mount that serves it.
+  struct stat mount_st{};
+  ::stat(paths_.mount_point.c_str(), &mount_st);
+  const WorkspaceIndexSeed index_seed{paths_.tribios_dir, paths_.base_dir,
+                                      workspace_inode_salt(name),
+                                      static_cast<std::uint32_t>(mount_st.st_dev)};
+  auto git_file = register_linked_worktree(paths_.root, branch, workspace_path,
+                                           paths_.staging_dir / name, index_seed);
   if (!git_file) {
     std::filesystem::remove_all(upper, ec);
     store_->set_workspace_state(name, WorkspaceState::Reclaimed);

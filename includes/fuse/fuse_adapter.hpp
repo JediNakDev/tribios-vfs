@@ -24,4 +24,11 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
 // the whole retry window stays mounted and the reason is returned.
 OutcomeVoid unmount_project_view(const std::filesystem::path& mount_point);
 
+// Drops what the kernel cached for a Workspace path that changed without going
+// through the mount. An empty path is the Workspace root. `name_unlinked` means
+// the path no longer names what it named before, so its directory entry goes
+// too. Does nothing on a mount that relies on short cache timeouts instead.
+void forget_kernel_cache_for_workspace_path(const std::string& workspace,
+                                            const std::string& relative_path, bool name_unlinked);
+
 }  // namespace tribios

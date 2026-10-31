@@ -23,6 +23,9 @@ using tribios::capture_base_state;
 
 namespace {
 
+// These cases cover Tribios' fixed rules, so no .tribiosignore applies.
+const tribios::CapturePolicy kNoPolicy;
+
 // A Project tree that exercises every rule the capture walk applies.
 struct CapturedProject {
   TemporaryDirectory root{"tribios-capture"};
@@ -57,7 +60,7 @@ struct CapturedProject {
 
 TEST_CASE("capture_base_state copies regular files with their contents and permission bits") {
   CapturedProject fixture;
-  auto stats = capture_base_state(fixture.project, fixture.base);
+  auto stats = capture_base_state(fixture.project, fixture.base, kNoPolicy);
   REQUIRE(stats.has_value());
 
   REQUIRE(std::filesystem::is_regular_file(fixture.base / "src/main.cpp"));
@@ -70,7 +73,7 @@ TEST_CASE("capture_base_state copies regular files with their contents and permi
 
 TEST_CASE("the Capture exclusion for Git and Tribios metadata applies only at the Project root") {
   CapturedProject fixture;
-  REQUIRE(capture_base_state(fixture.project, fixture.base).has_value());
+  REQUIRE(capture_base_state(fixture.project, fixture.base, kNoPolicy).has_value());
 
   CHECK_FALSE(std::filesystem::exists(fixture.base / ".git"));
   CHECK_FALSE(std::filesystem::exists(fixture.base / ".tribios"));
@@ -83,7 +86,7 @@ TEST_CASE("the Capture exclusion for Git and Tribios metadata applies only at th
 
 TEST_CASE("Capture exclusions are independent of Git ignore rules") {
   CapturedProject fixture;
-  REQUIRE(capture_base_state(fixture.project, fixture.base).has_value());
+  REQUIRE(capture_base_state(fixture.project, fixture.base, kNoPolicy).has_value());
 
   // Nothing reads .gitignore, so an ignored file and an ignored directory are
   // captured like any other content. kSecretsWarning is the documented
@@ -96,7 +99,7 @@ TEST_CASE("Capture exclusions are independent of Git ignore rules") {
 
 TEST_CASE("symlinks are captured as symlinks and are never followed") {
   CapturedProject fixture;
-  REQUIRE(capture_base_state(fixture.project, fixture.base).has_value());
+  REQUIRE(capture_base_state(fixture.project, fixture.base, kNoPolicy).has_value());
 
   REQUIRE(std::filesystem::is_symlink(fixture.base / "link-to-file"));
   CHECK(std::filesystem::read_symlink(fixture.base / "link-to-file") == "src/main.cpp");
@@ -115,7 +118,7 @@ TEST_CASE("symlinks are captured as symlinks and are never followed") {
 
 TEST_CASE("special files are excluded from the Base state") {
   CapturedProject fixture;
-  REQUIRE(capture_base_state(fixture.project, fixture.base).has_value());
+  REQUIRE(capture_base_state(fixture.project, fixture.base, kNoPolicy).has_value());
 
   REQUIRE(std::filesystem::exists(std::filesystem::symlink_status(fixture.project / "control.fifo")));
   CHECK_FALSE(std::filesystem::exists(std::filesystem::symlink_status(fixture.base / "control.fifo")));
@@ -123,7 +126,7 @@ TEST_CASE("special files are excluded from the Base state") {
 
 TEST_CASE("CaptureStats counts captured entries and sums only regular-file bytes") {
   CapturedProject fixture;
-  auto stats = capture_base_state(fixture.project, fixture.base);
+  auto stats = capture_base_state(fixture.project, fixture.base, kNoPolicy);
   REQUIRE(stats.has_value());
 
   // src, src/main.cpp, .gitignore, secret.env, build, build/artifact.o, vendor,
@@ -148,7 +151,7 @@ TEST_CASE("capture_base_state creates the Base directory and captures an empty P
   std::filesystem::create_directories(project);
   const auto base = root.path() / "nested/base";
 
-  auto stats = capture_base_state(project, base);
+  auto stats = capture_base_state(project, base, kNoPolicy);
   REQUIRE(stats.has_value());
   CHECK(stats->entry_count == 0);
   CHECK(stats->bytes == 0);
@@ -159,11 +162,13 @@ TEST_CASE("capture_base_state reports an error when the Project root is not a di
   TemporaryDirectory root("tribios-capture-error");
   write_file_creating_parents(root.path() / "not-a-directory", "x");
 
-  auto missing = capture_base_state(root.path() / "does-not-exist", root.path() / "base");
+  auto missing =
+      capture_base_state(root.path() / "does-not-exist", root.path() / "base", kNoPolicy);
   REQUIRE_FALSE(missing.has_value());
   CHECK(missing.error().find("is not a directory") != std::string::npos);
 
-  auto regular_file = capture_base_state(root.path() / "not-a-directory", root.path() / "base");
+  auto regular_file =
+      capture_base_state(root.path() / "not-a-directory", root.path() / "base", kNoPolicy);
   REQUIRE_FALSE(regular_file.has_value());
   CHECK(regular_file.error().find("is not a directory") != std::string::npos);
 }

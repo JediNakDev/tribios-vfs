@@ -47,7 +47,7 @@ assert_contains '${misc:Depends}' "$control"
 assert_contains "libfuse3-dev" "$control"
 assert_contains "fuse3, git" "$control"
 assert_contains "libsqlite3-dev" "$control"
-assert_contains "cmake (>= 3.24)" "$control"
+assert_contains "cmake (>= 3.22)" "$control"
 
 # The package build must not reach the network for Catch2 or run the tier ladder.
 rules="$(cat "$ROOT/packaging/debian/rules")"

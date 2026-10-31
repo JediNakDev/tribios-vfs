@@ -22,7 +22,7 @@ Everything else is untested, including Ubuntu 22.04 and every APT-based derivati
 Sharing a package manager with Debian is not compatibility.
 Each derivative needs its own install and workflow run before it can be listed above.
 
-Ubuntu 22.04 jammy is excluded for a concrete reason: it ships CMake 3.22, and Tribios requires 3.24 or newer.
+Ubuntu 22.04 jammy is excluded for a concrete reason: its default compiler is GCC 11, whose libstdc++ has no `<expected>`, and Tribios is C++23.
 
 ## Install
 

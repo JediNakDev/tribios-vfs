@@ -45,6 +45,15 @@ sudo dnf copr enable jedinakdev/tribios-vfs
 sudo dnf install tribios-vfs
 ```
 
+**Amazon Linux 2023**
+
+```sh
+version=0.0.1
+sudo dnf install "https://github.com/JediNakDev/tribios-vfs/releases/download/v$version/tribios-vfs-$version-1.amzn2023.$(uname -m).rpm"
+```
+
+`docs/install/amazon-linux-2023.md` explains why this is a release asset rather than a repository.
+
 **Arch Linux**
 
 ```sh
@@ -70,6 +79,11 @@ tribios info
 
 `tribios configure` captures the project's current files as an immutable Base state, including ignored and untracked files.
 Review the warning it prints before continuing.
+
+To keep secrets, caches, or machine-specific files out of every Workspace, list them in a `.tribiosignore` file at the project root before you configure.
+It uses gitignore-style patterns and is independent of `.gitignore`.
+Preview the result with `tribios configure . --dry-run`, and ask why one path is included or excluded with `tribios check-ignore <path>`.
+See [`docs/tribiosignore.md`](docs/tribiosignore.md) for the full syntax.
 Run `tribios info` and confirm that it reports `mount backend: mounted`.
 
 Create a Workspace for an agent, then work inside its mounted directory:
@@ -95,3 +109,12 @@ tribios daemon stop
 
 Workspace removal returns after the Workspace disappears.
 `tribios workspace wait-reclaim` waits for its storage to be reclaimed in the background and is optional.
+
+## Agent skill
+
+`skills/tribios-parallel-workspaces` is an agent skill that lets a coding agent set up and clean up one Workspace per parallel agent.
+Copy it into your agent's skills directory, for example:
+
+```sh
+cp -R skills/tribios-parallel-workspaces ~/.claude/skills/
+```

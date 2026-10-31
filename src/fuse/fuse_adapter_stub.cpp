@@ -25,4 +25,6 @@ OutcomeVoid run_project_mount(ProjectManager&, const std::filesystem::path&, boo
 
 OutcomeVoid unmount_project_view(const std::filesystem::path&) { return {}; }
 
+void forget_kernel_cache_for_workspace_path(const std::string&, const std::string&, bool) {}
+
 }  // namespace tribios
