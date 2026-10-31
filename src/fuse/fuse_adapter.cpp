@@ -9,9 +9,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/paths.hpp"
 #include "core/proc.hpp"
@@ -32,6 +34,12 @@ struct ViewPath {
   std::string workspace;
   std::string relative;
   bool is_root = false;
+};
+
+struct DirectorySnapshot {
+  std::vector<DirEntry> entries;
+  // opendir builds a fresh listing, so the first offset-zero read can reuse it.
+  bool first_read_pending = true;
 };
 
 ViewPath parse_project_view_path(const char* path) {
@@ -96,11 +104,11 @@ int tri_getattr(const char* path, struct stat* out
 // populated d_type. Without it every entry reads as DT_UNKNOWN and tools such
 // as find, ls and git follow up with a separate lookup per entry.
 int fill_directory_entry(void* buffer, fuse_fill_dir_t filler, const std::string& name,
-                         std::uint64_t ino, mode_t mode) {
+                         std::uint64_t ino, mode_t mode, off_t next_offset) {
   struct stat entry_type {};
   entry_type.st_ino = static_cast<ino_t>(ino);
   entry_type.st_mode = mode;
-  return filler(buffer, name.c_str(), &entry_type, 0
+  return filler(buffer, name.c_str(), &entry_type, next_offset
 #if TRIBIOS_FUSE_API_VERSION >= 30
                 , static_cast<fuse_fill_dir_flags>(0)
 #endif
@@ -124,32 +132,71 @@ std::uint64_t parent_view_path_inode(const ViewPath& view) {
   return resolve_view_path_inode(parent);
 }
 
-int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t,
-                struct fuse_file_info*
+// Returns a negative errno on failure.
+int build_directory_snapshot(const char* path, std::unique_ptr<DirectorySnapshot>& snapshot) {
+  snapshot = std::make_unique<DirectorySnapshot>();
+  const ViewPath view = parse_project_view_path(path);
+  snapshot->entries.push_back(DirEntry{".", resolve_view_path_inode(view), S_IFDIR});
+  snapshot->entries.push_back(DirEntry{"..", parent_view_path_inode(view), S_IFDIR});
+  if (view.is_root) {
+    for (const auto& name : glb_project_manager->active_workspace_names()) {
+      ViewPath workspace_root;
+      workspace_root.workspace = name;
+      snapshot->entries.push_back(
+          DirEntry{name, resolve_view_path_inode(workspace_root), S_IFDIR});
+    }
+  } else {
+    auto engine = find_workspace_engine_for_view_path(view);
+    if (engine == nullptr) return -ENOENT;
+    auto entries = engine->readdir(view.relative);
+    if (!entries) return -entries.error();
+    for (auto& entry : *entries) snapshot->entries.push_back(std::move(entry));
+  }
+  return 0;
+}
+
+int tri_opendir(const char* path, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  std::unique_ptr<DirectorySnapshot> snapshot;
+  if (const int error = build_directory_snapshot(path, snapshot); error != 0) return error;
+  info->fh = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(snapshot.release()));
+  return 0;
+}
+
+int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t offset,
+                struct fuse_file_info* info
 #if TRIBIOS_FUSE_API_VERSION >= 30
                 , fuse_readdir_flags
 #endif
 ) {
-  const ViewPath view = parse_project_view_path(path);
-  fill_directory_entry(buffer, filler, ".", resolve_view_path_inode(view), S_IFDIR);
-  fill_directory_entry(buffer, filler, "..", parent_view_path_inode(view), S_IFDIR);
-  if (view.is_root) {
-    // The immediate children of the Project view are its visible Workspaces.
-    for (const auto& name : glb_project_manager->active_workspace_names()) {
-      ViewPath workspace_root;
-      workspace_root.workspace = name;
-      fill_directory_entry(buffer, filler, name, resolve_view_path_inode(workspace_root),
-                           S_IFDIR);
+  if (info == nullptr || info->fh == 0) return -EBADF;
+  if (offset < 0) return -EINVAL;
+  auto* snapshot = reinterpret_cast<DirectorySnapshot*>(static_cast<std::uintptr_t>(info->fh));
+  // Offset zero after the first read is a rewinddir, which must see current contents.
+  // Nonzero offsets keep the snapshot so one pass stays stable.
+  if (offset == 0 && !snapshot->first_read_pending) {
+    std::unique_ptr<DirectorySnapshot> refreshed_snapshot;
+    if (const int error = build_directory_snapshot(path, refreshed_snapshot); error != 0) {
+      return error;
     }
-    return 0;
+    *snapshot = std::move(*refreshed_snapshot);
   }
-  auto engine = find_workspace_engine_for_view_path(view);
-  if (engine == nullptr) return -ENOENT;
-  auto entries = engine->readdir(view.relative);
-  if (!entries) return -entries.error();
-  for (const auto& entry : *entries) {
-    fill_directory_entry(buffer, filler, entry.name, entry.ino, entry.mode);
+  snapshot->first_read_pending = false;
+  const std::size_t first_entry = static_cast<std::size_t>(offset);
+  for (std::size_t index = first_entry; index < snapshot->entries.size(); ++index) {
+    const auto& entry = snapshot->entries[index];
+    if (fill_directory_entry(buffer, filler, entry.name, entry.ino, entry.mode,
+                             static_cast<off_t>(index + 1)) != 0) {
+      break;
+    }
   }
+  return 0;
+}
+
+int tri_releasedir(const char*, struct fuse_file_info* info) {
+  if (info == nullptr || info->fh == 0) return 0;
+  delete reinterpret_cast<DirectorySnapshot*>(static_cast<std::uintptr_t>(info->fh));
+  info->fh = 0;
   return 0;
 }
 
@@ -340,12 +387,14 @@ int tri_fsync(const char* path, int data_only, struct fuse_file_info* info) {
   return status ? 0 : -status.error();
 }
 
-int tri_flush(const char* path, struct fuse_file_info* info) {
-  if (info == nullptr) return -EBADF;
-  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
-  if (engine == nullptr) return -ENOENT;
-  auto status = engine->fsync_handle(static_cast<int>(info->fh), false);
-  return status ? 0 : -status.error();
+// FUSE calls flush on every close, and neither POSIX nor ADR 0005 makes close
+// durable: only a successful fsync has to survive a restart. Writes already
+// reach the backing file synchronously and report their errors at write time,
+// so there is nothing left to flush here. Syncing instead cost a full data and
+// directory barrier per closed file, which is what made a mounted build on
+// Linux hundreds of times slower than the native baseline.
+int tri_flush(const char*, struct fuse_file_info* info) {
+  return info == nullptr ? -EBADF : 0;
 }
 
 int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
@@ -366,7 +415,9 @@ void* tri_init(struct fuse_conn_info*, struct fuse_config* config) {
 fuse_operations create_fuse_operations() {
   fuse_operations ops{};
   ops.getattr = tri_getattr;
+  ops.opendir = tri_opendir;
   ops.readdir = tri_readdir;
+  ops.releasedir = tri_releasedir;
   ops.readlink = tri_readlink;
   ops.open = tri_open;
   ops.create = tri_create;
