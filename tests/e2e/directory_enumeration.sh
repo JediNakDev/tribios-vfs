@@ -24,4 +24,5 @@ ws_write enumeration bulk/subdirectory/nested.txt upper
 # Let pre-copy-up getattr replies expire before comparing stat and readdir.
 sleep 1.1
 "$DIRECTORY_PROBE" "$(ws_path enumeration)/bulk" "$ENTRY_COUNT"
+"$DIRECTORY_PROBE" "$(ws_path enumeration)/bulk" "$ENTRY_COUNT" rewind
 stop_daemon

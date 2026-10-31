@@ -38,6 +38,8 @@ struct ViewPath {
 
 struct DirectorySnapshot {
   std::vector<DirEntry> entries;
+  // opendir builds a fresh listing, so the first offset-zero read can reuse it.
+  bool first_read_pending = true;
 };
 
 ViewPath parse_project_view_path(const char* path) {
@@ -130,9 +132,9 @@ std::uint64_t parent_view_path_inode(const ViewPath& view) {
   return resolve_view_path_inode(parent);
 }
 
-int tri_opendir(const char* path, struct fuse_file_info* info) {
-  if (info == nullptr) return -EBADF;
-  auto snapshot = std::make_unique<DirectorySnapshot>();
+// Returns a negative errno on failure.
+int build_directory_snapshot(const char* path, std::unique_ptr<DirectorySnapshot>& snapshot) {
+  snapshot = std::make_unique<DirectorySnapshot>();
   const ViewPath view = parse_project_view_path(path);
   snapshot->entries.push_back(DirEntry{".", resolve_view_path_inode(view), S_IFDIR});
   snapshot->entries.push_back(DirEntry{"..", parent_view_path_inode(view), S_IFDIR});
@@ -150,12 +152,18 @@ int tri_opendir(const char* path, struct fuse_file_info* info) {
     if (!entries) return -entries.error();
     for (auto& entry : *entries) snapshot->entries.push_back(std::move(entry));
   }
+  return 0;
+}
 
+int tri_opendir(const char* path, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  std::unique_ptr<DirectorySnapshot> snapshot;
+  if (const int error = build_directory_snapshot(path, snapshot); error != 0) return error;
   info->fh = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(snapshot.release()));
   return 0;
 }
 
-int tri_readdir(const char*, void* buffer, fuse_fill_dir_t filler, off_t offset,
+int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t offset,
                 struct fuse_file_info* info
 #if TRIBIOS_FUSE_API_VERSION >= 30
                 , fuse_readdir_flags
@@ -164,6 +172,16 @@ int tri_readdir(const char*, void* buffer, fuse_fill_dir_t filler, off_t offset,
   if (info == nullptr || info->fh == 0) return -EBADF;
   if (offset < 0) return -EINVAL;
   auto* snapshot = reinterpret_cast<DirectorySnapshot*>(static_cast<std::uintptr_t>(info->fh));
+  // Offset zero after the first read is a rewinddir, which must see current contents.
+  // Nonzero offsets keep the snapshot so one pass stays stable.
+  if (offset == 0 && !snapshot->first_read_pending) {
+    std::unique_ptr<DirectorySnapshot> refreshed_snapshot;
+    if (const int error = build_directory_snapshot(path, refreshed_snapshot); error != 0) {
+      return error;
+    }
+    *snapshot = std::move(*refreshed_snapshot);
+  }
+  snapshot->first_read_pending = false;
   const std::size_t first_entry = static_cast<std::size_t>(offset);
   for (std::size_t index = first_entry; index < snapshot->entries.size(); ++index) {
     const auto& entry = snapshot->entries[index];
