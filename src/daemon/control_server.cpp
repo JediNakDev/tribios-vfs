@@ -244,6 +244,11 @@ std::vector<std::string> ControlServer::dispatch_control_request(
   }
 
   if (verb == "shutdown") {
+    if (shutdown_unmount_) {
+      auto unmounted = shutdown_unmount_();
+      if (!unmounted) return error_reply(unmounted.error());
+      mount_active_.store(false);
+    }
     running_.store(false);
     return ok_reply({"stopping"});
   }

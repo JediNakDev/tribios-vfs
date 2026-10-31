@@ -81,7 +81,8 @@ If Tribios reports that the invoking user cannot read and write `/dev/fuse`, che
 Do not work around this by running the daemon as root.
 
 If the mount point is stale, run `fusermount3 -u` as shown above and start the daemon again.
-If unmount reports that the target is busy, stop tools whose working directory or open files are inside the mount and retry.
+If `daemon stop` or unmount reports that the mount is busy, stop tools whose working directory or open files are inside the mount and retry.
+The daemon keeps serving until a stop succeeds, so nothing is lost while you do.
 
 If startup reports an unsafe recovery state, do not remove `.tribios` or edit `meta.db`.
 Inspect the retained operation and diagnostic identifier:

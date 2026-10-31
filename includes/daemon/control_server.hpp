@@ -31,6 +31,12 @@ class ControlServer {
   // Reported by `info` so callers know whether a mounted path exists.
   void set_mount_active(bool active) { mount_active_.store(active); }
 
+  // Runs on a shutdown request before the server agrees to stop. A failure
+  // refuses the shutdown and is reported to the caller, and serving continues.
+  void set_shutdown_unmount(std::function<OutcomeVoid()> unmount) {
+    shutdown_unmount_ = std::move(unmount);
+  }
+
   void set_external_change_handler(ExternalChangeHandler handler) {
     external_change_handler_ = std::move(handler);
   }
@@ -42,6 +48,7 @@ class ControlServer {
   std::filesystem::path socket_path_;
   std::atomic<bool> running_{true};
   std::atomic<bool> mount_active_{false};
+  std::function<OutcomeVoid()> shutdown_unmount_;
   ExternalChangeHandler external_change_handler_;
   int listen_fd_ = -1;
 };
