@@ -89,6 +89,7 @@ class WorkspaceEngine {
   Layer find_visible_entry_layer(const std::string& relative, struct stat& out) const;
   void merge_visible_directory_entries(const std::string& relative,
                                        std::map<std::string, DirEntry>& entries) const;
+  void forget_cached_directory_entries(const std::string& relative);
   Status create_missing_upper_parent_directories(const std::string& relative);
   Status materialize_visible_entry_at(const std::string& relative,
                                       const std::filesystem::path& destination);
@@ -97,6 +98,7 @@ class WorkspaceEngine {
       const std::function<Status(const std::filesystem::path&)>& prepare_stage);
   Status remove_visible_entry_atomically(const std::string& kind,
                                          const std::string& relative, bool directory);
+  std::uint64_t workspace_inode_for(std::uint64_t backing_inode) const;
   std::uint64_t workspace_inode_for(const struct stat& backing) const;
 
   struct OpenHandle {
@@ -112,6 +114,11 @@ class WorkspaceEngine {
   MetadataStore& store_;
   mutable std::shared_mutex mutex_;
   std::set<std::string> tombstones_;
+  // Merged listings keyed by directory. Readers share mutex_, so this mutex
+  // serializes their cache fills; mutations hold mutex_ exclusively and drop
+  // the listings they affect.
+  std::mutex directory_entries_cache_mutex_;
+  std::map<std::string, std::vector<DirEntry>> directory_entries_cache_;
   std::mutex handles_mutex_;
   std::map<int, OpenHandle> handles_;
   int next_handle_ = 1;

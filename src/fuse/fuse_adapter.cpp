@@ -8,10 +8,18 @@
 #include <fuse.h>
 #include <string.h>
 #include <unistd.h>
+#if TRIBIOS_FUSE_API_VERSION >= 30
+#include <fcntl.h>
+#include <fuse_lowlevel.h>
+#endif
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "core/paths.hpp"
 #include "core/proc.hpp"
@@ -20,6 +28,20 @@ namespace tribios {
 namespace {
 
 ProjectManager* glb_project_manager = nullptr;
+
+#if TRIBIOS_FUSE_API_VERSION >= 30
+// Linux lets the kernel trust entries and attributes for this long, which is
+// what keeps concurrent `git status` runs off the daemon. Changes made through
+// the mount keep the kernel current on their own; the daemon drops what it
+// cached for every other change through forget_kernel_cache_for_workspace_path.
+constexpr double kKernelCacheSeconds = 60.0;
+
+// The running FUSE instance, cleared before libfuse frees it, so a control
+// request never reaches a mount that is shutting down.
+std::mutex glb_mounted_fuse_mutex;
+struct fuse* glb_mounted_fuse = nullptr;
+std::filesystem::path glb_mounted_view_root;
+#endif
 
 // The view root has no backing directory of its own, so it gets a fixed inode.
 // Workspace inodes come from the engines and are mixed across the 64-bit range,
@@ -32,6 +54,12 @@ struct ViewPath {
   std::string workspace;
   std::string relative;
   bool is_root = false;
+};
+
+struct DirectorySnapshot {
+  std::vector<DirEntry> entries;
+  // opendir builds a fresh listing, so the first offset-zero read can reuse it.
+  bool first_read_pending = true;
 };
 
 ViewPath parse_project_view_path(const char* path) {
@@ -96,11 +124,11 @@ int tri_getattr(const char* path, struct stat* out
 // populated d_type. Without it every entry reads as DT_UNKNOWN and tools such
 // as find, ls and git follow up with a separate lookup per entry.
 int fill_directory_entry(void* buffer, fuse_fill_dir_t filler, const std::string& name,
-                         std::uint64_t ino, mode_t mode) {
+                         std::uint64_t ino, mode_t mode, off_t next_offset) {
   struct stat entry_type {};
   entry_type.st_ino = static_cast<ino_t>(ino);
   entry_type.st_mode = mode;
-  return filler(buffer, name.c_str(), &entry_type, 0
+  return filler(buffer, name.c_str(), &entry_type, next_offset
 #if TRIBIOS_FUSE_API_VERSION >= 30
                 , static_cast<fuse_fill_dir_flags>(0)
 #endif
@@ -124,32 +152,71 @@ std::uint64_t parent_view_path_inode(const ViewPath& view) {
   return resolve_view_path_inode(parent);
 }
 
-int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t,
-                struct fuse_file_info*
+// Returns a negative errno on failure.
+int build_directory_snapshot(const char* path, std::unique_ptr<DirectorySnapshot>& snapshot) {
+  snapshot = std::make_unique<DirectorySnapshot>();
+  const ViewPath view = parse_project_view_path(path);
+  snapshot->entries.push_back(DirEntry{".", resolve_view_path_inode(view), S_IFDIR});
+  snapshot->entries.push_back(DirEntry{"..", parent_view_path_inode(view), S_IFDIR});
+  if (view.is_root) {
+    for (const auto& name : glb_project_manager->active_workspace_names()) {
+      ViewPath workspace_root;
+      workspace_root.workspace = name;
+      snapshot->entries.push_back(
+          DirEntry{name, resolve_view_path_inode(workspace_root), S_IFDIR});
+    }
+  } else {
+    auto engine = find_workspace_engine_for_view_path(view);
+    if (engine == nullptr) return -ENOENT;
+    auto entries = engine->readdir(view.relative);
+    if (!entries) return -entries.error();
+    for (auto& entry : *entries) snapshot->entries.push_back(std::move(entry));
+  }
+  return 0;
+}
+
+int tri_opendir(const char* path, struct fuse_file_info* info) {
+  if (info == nullptr) return -EBADF;
+  std::unique_ptr<DirectorySnapshot> snapshot;
+  if (const int error = build_directory_snapshot(path, snapshot); error != 0) return error;
+  info->fh = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(snapshot.release()));
+  return 0;
+}
+
+int tri_readdir(const char* path, void* buffer, fuse_fill_dir_t filler, off_t offset,
+                struct fuse_file_info* info
 #if TRIBIOS_FUSE_API_VERSION >= 30
                 , fuse_readdir_flags
 #endif
 ) {
-  const ViewPath view = parse_project_view_path(path);
-  fill_directory_entry(buffer, filler, ".", resolve_view_path_inode(view), S_IFDIR);
-  fill_directory_entry(buffer, filler, "..", parent_view_path_inode(view), S_IFDIR);
-  if (view.is_root) {
-    // The immediate children of the Project view are its visible Workspaces.
-    for (const auto& name : glb_project_manager->active_workspace_names()) {
-      ViewPath workspace_root;
-      workspace_root.workspace = name;
-      fill_directory_entry(buffer, filler, name, resolve_view_path_inode(workspace_root),
-                           S_IFDIR);
+  if (info == nullptr || info->fh == 0) return -EBADF;
+  if (offset < 0) return -EINVAL;
+  auto* snapshot = reinterpret_cast<DirectorySnapshot*>(static_cast<std::uintptr_t>(info->fh));
+  // Offset zero after the first read is a rewinddir, which must see current contents.
+  // Nonzero offsets keep the snapshot so one pass stays stable.
+  if (offset == 0 && !snapshot->first_read_pending) {
+    std::unique_ptr<DirectorySnapshot> refreshed_snapshot;
+    if (const int error = build_directory_snapshot(path, refreshed_snapshot); error != 0) {
+      return error;
     }
-    return 0;
+    *snapshot = std::move(*refreshed_snapshot);
   }
-  auto engine = find_workspace_engine_for_view_path(view);
-  if (engine == nullptr) return -ENOENT;
-  auto entries = engine->readdir(view.relative);
-  if (!entries) return -entries.error();
-  for (const auto& entry : *entries) {
-    fill_directory_entry(buffer, filler, entry.name, entry.ino, entry.mode);
+  snapshot->first_read_pending = false;
+  const std::size_t first_entry = static_cast<std::size_t>(offset);
+  for (std::size_t index = first_entry; index < snapshot->entries.size(); ++index) {
+    const auto& entry = snapshot->entries[index];
+    if (fill_directory_entry(buffer, filler, entry.name, entry.ino, entry.mode,
+                             static_cast<off_t>(index + 1)) != 0) {
+      break;
+    }
   }
+  return 0;
+}
+
+int tri_releasedir(const char*, struct fuse_file_info* info) {
+  if (info == nullptr || info->fh == 0) return 0;
+  delete reinterpret_cast<DirectorySnapshot*>(static_cast<std::uintptr_t>(info->fh));
+  info->fh = 0;
   return 0;
 }
 
@@ -340,12 +407,14 @@ int tri_fsync(const char* path, int data_only, struct fuse_file_info* info) {
   return status ? 0 : -status.error();
 }
 
-int tri_flush(const char* path, struct fuse_file_info* info) {
-  if (info == nullptr) return -EBADF;
-  auto engine = find_workspace_engine_for_view_path(parse_project_view_path(path));
-  if (engine == nullptr) return -ENOENT;
-  auto status = engine->fsync_handle(static_cast<int>(info->fh), false);
-  return status ? 0 : -status.error();
+// FUSE calls flush on every close, and neither POSIX nor ADR 0005 makes close
+// durable: only a successful fsync has to survive a restart. Writes already
+// reach the backing file synchronously and report their errors at write time,
+// so there is nothing left to flush here. Syncing instead cost a full data and
+// directory barrier per closed file, which is what made a mounted build on
+// Linux hundreds of times slower than the native baseline.
+int tri_flush(const char*, struct fuse_file_info* info) {
+  return info == nullptr ? -EBADF : 0;
 }
 
 int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
@@ -359,14 +428,47 @@ int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
 #if TRIBIOS_FUSE_API_VERSION >= 30
 void* tri_init(struct fuse_conn_info*, struct fuse_config* config) {
   config->use_ino = 1;
+  config->entry_timeout = kKernelCacheSeconds;
+  config->attr_timeout = kKernelCacheSeconds;
+  std::lock_guard lock(glb_mounted_fuse_mutex);
+  glb_mounted_fuse = fuse_get_context()->fuse;
   return nullptr;
+}
+
+void tri_destroy(void*) {
+  std::lock_guard lock(glb_mounted_fuse_mutex);
+  glb_mounted_fuse = nullptr;
+}
+
+// The kernel's FUSE node id for a directory in the mounted view. The kernel
+// encodes a FUSE file handle as the node id's high and low words followed by
+// the generation, under handle type FILEID_INO64_GEN or, with the parent
+// appended, FILEID_INO64_GEN_PARENT. Resolving the path goes through the
+// mount, so it must not run on a FUSE request thread.
+std::optional<fuse_ino_t> kernel_node_id_for_view_directory(const std::filesystem::path& path) {
+  constexpr int kFileIdIno64Gen = 0x81;
+  constexpr int kFileIdIno64GenParent = 0x82;
+  alignas(file_handle) unsigned char storage[sizeof(file_handle) + MAX_HANDLE_SZ];
+  auto* handle = reinterpret_cast<file_handle*>(storage);
+  handle->handle_bytes = MAX_HANDLE_SZ;
+  int mount_id = 0;
+  if (::name_to_handle_at(AT_FDCWD, path.c_str(), handle, &mount_id, 0) != 0) return std::nullopt;
+  if ((handle->handle_type != kFileIdIno64Gen && handle->handle_type != kFileIdIno64GenParent) ||
+      handle->handle_bytes < 2 * sizeof(std::uint32_t)) {
+    return std::nullopt;
+  }
+  std::uint32_t words[2];
+  memcpy(words, handle->f_handle, sizeof(words));
+  return (static_cast<fuse_ino_t>(words[0]) << 32) | words[1];
 }
 #endif
 
 fuse_operations create_fuse_operations() {
   fuse_operations ops{};
   ops.getattr = tri_getattr;
+  ops.opendir = tri_opendir;
   ops.readdir = tri_readdir;
+  ops.releasedir = tri_releasedir;
   ops.readlink = tri_readlink;
   ops.open = tri_open;
   ops.create = tri_create;
@@ -394,6 +496,7 @@ fuse_operations create_fuse_operations() {
   ops.fsyncdir = tri_fsyncdir;
 #if TRIBIOS_FUSE_API_VERSION >= 30
   ops.init = tri_init;
+  ops.destroy = tri_destroy;
 #endif
   return ops;
 }
@@ -418,6 +521,9 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
 #endif
 
   glb_project_manager = &manager;
+#if TRIBIOS_FUSE_API_VERSION >= 30
+  glb_mounted_view_root = mount_point;
+#endif
   std::error_code ec;
   std::filesystem::create_directories(mount_point, ec);
   if (ec) return error("cannot prepare mount point " + mount_point.string() + ": " + ec.message());
@@ -443,6 +549,40 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
   glb_project_manager = nullptr;
   if (status != 0) return error("FUSE event loop exited with status " + std::to_string(status));
   return {};
+}
+
+void forget_kernel_cache_for_workspace_path(const std::string& workspace,
+                                            const std::string& relative_path, bool name_unlinked) {
+#if TRIBIOS_FUSE_API_VERSION >= 30
+  std::lock_guard lock(glb_mounted_fuse_mutex);
+  if (glb_mounted_fuse == nullptr) return;
+  const std::string relative = normalize_relative(relative_path);
+  const std::string view_path = "/" + workspace + (relative.empty() ? "" : "/" + relative);
+  const std::size_t slash = view_path.rfind('/');
+  const std::string parent_view_path = slash == 0 ? "/" : view_path.substr(0, slash);
+  const std::string name = view_path.substr(slash + 1);
+
+  // libfuse answers -ENOENT for a path the kernel has not looked up, and a
+  // parent the kernel has not looked up holds no cached entry for the name.
+  fuse_invalidate_path(glb_mounted_fuse, view_path.c_str());
+  if (fuse_invalidate_path(glb_mounted_fuse, parent_view_path.c_str()) != 0 || !name_unlinked) {
+    return;
+  }
+  // Only the stale name is dropped. Dropping a whole Workspace directory would
+  // also detach it from every shell whose working directory is inside it.
+  const auto parent_node =
+      kernel_node_id_for_view_directory(glb_mounted_view_root / parent_view_path.substr(1));
+  if (parent_node) {
+    fuse_lowlevel_notify_inval_entry(fuse_get_session(glb_mounted_fuse), *parent_node,
+                                     name.c_str(), name.size());
+  }
+#else
+  // macFUSE keeps the one-second default timeouts, which bound how long a
+  // change made outside the mount can stay hidden.
+  (void)workspace;
+  (void)relative_path;
+  (void)name_unlinked;
+#endif
 }
 
 void request_unmount(const std::filesystem::path& mount_point) {

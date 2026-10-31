@@ -149,6 +149,11 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
   if (std::filesystem::exists(paths.database, ec) && !force) {
     return error("project is already configured; the Base state is captured once");
   }
+  // The whole policy is validated before anything is written or, with
+  // --force, removed, so a malformed policy never costs the existing Base
+  // state or leaves a partial one behind.
+  auto policy = CapturePolicy::load_from_project(paths.root);
+  if (!policy) return std::unexpected(policy.error());
   if (force) std::filesystem::remove_all(paths.tribios_dir, ec);
   for (const auto& dir :
        {paths.tribios_dir, paths.workspaces_dir, paths.staging_dir, paths.mount_point}) {
@@ -159,7 +164,7 @@ Outcome<CaptureStats> ProjectManager::configure(const std::filesystem::path& pro
     return std::unexpected(durable.error());
   }
 
-  auto captured = capture_base_state(paths.root, paths.base_dir);
+  auto captured = capture_base_state(paths.root, paths.base_dir, *policy);
   if (!captured) return std::unexpected(captured.error());
   if (auto synced = sync_tree_durably(paths.base_dir); !synced) {
     return std::unexpected(synced.error());
