@@ -32,6 +32,7 @@ set(TRIBIOS_DESIGN_TESTS
   debian_packaging
   packaging_rpm_spec
   linux_fuse3_build
+  kernel_cache_coherence
 )
 
 foreach(script IN LISTS TRIBIOS_INVARIANT_TESTS TRIBIOS_DESIGN_TESTS)

@@ -8,10 +8,16 @@
 #include <fuse.h>
 #include <string.h>
 #include <unistd.h>
+#if TRIBIOS_FUSE_API_VERSION >= 30
+#include <fcntl.h>
+#include <fuse_lowlevel.h>
+#endif
 
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +28,20 @@ namespace tribios {
 namespace {
 
 ProjectManager* glb_project_manager = nullptr;
+
+#if TRIBIOS_FUSE_API_VERSION >= 30
+// Linux lets the kernel trust entries and attributes for this long, which is
+// what keeps concurrent `git status` runs off the daemon. Changes made through
+// the mount keep the kernel current on their own; the daemon drops what it
+// cached for every other change through forget_kernel_cache_for_workspace_path.
+constexpr double kKernelCacheSeconds = 60.0;
+
+// The running FUSE instance, cleared before libfuse frees it, so a control
+// request never reaches a mount that is shutting down.
+std::mutex glb_mounted_fuse_mutex;
+struct fuse* glb_mounted_fuse = nullptr;
+std::filesystem::path glb_mounted_view_root;
+#endif
 
 // The view root has no backing directory of its own, so it gets a fixed inode.
 // Workspace inodes come from the engines and are mixed across the 64-bit range,
@@ -408,7 +428,38 @@ int tri_fsyncdir(const char* path, int data_only, struct fuse_file_info*) {
 #if TRIBIOS_FUSE_API_VERSION >= 30
 void* tri_init(struct fuse_conn_info*, struct fuse_config* config) {
   config->use_ino = 1;
+  config->entry_timeout = kKernelCacheSeconds;
+  config->attr_timeout = kKernelCacheSeconds;
+  std::lock_guard lock(glb_mounted_fuse_mutex);
+  glb_mounted_fuse = fuse_get_context()->fuse;
   return nullptr;
+}
+
+void tri_destroy(void*) {
+  std::lock_guard lock(glb_mounted_fuse_mutex);
+  glb_mounted_fuse = nullptr;
+}
+
+// The kernel's FUSE node id for a directory in the mounted view. The kernel
+// encodes a FUSE file handle as the node id's high and low words followed by
+// the generation, under handle type FILEID_INO64_GEN or, with the parent
+// appended, FILEID_INO64_GEN_PARENT. Resolving the path goes through the
+// mount, so it must not run on a FUSE request thread.
+std::optional<fuse_ino_t> kernel_node_id_for_view_directory(const std::filesystem::path& path) {
+  constexpr int kFileIdIno64Gen = 0x81;
+  constexpr int kFileIdIno64GenParent = 0x82;
+  alignas(file_handle) unsigned char storage[sizeof(file_handle) + MAX_HANDLE_SZ];
+  auto* handle = reinterpret_cast<file_handle*>(storage);
+  handle->handle_bytes = MAX_HANDLE_SZ;
+  int mount_id = 0;
+  if (::name_to_handle_at(AT_FDCWD, path.c_str(), handle, &mount_id, 0) != 0) return std::nullopt;
+  if ((handle->handle_type != kFileIdIno64Gen && handle->handle_type != kFileIdIno64GenParent) ||
+      handle->handle_bytes < 2 * sizeof(std::uint32_t)) {
+    return std::nullopt;
+  }
+  std::uint32_t words[2];
+  memcpy(words, handle->f_handle, sizeof(words));
+  return (static_cast<fuse_ino_t>(words[0]) << 32) | words[1];
 }
 #endif
 
@@ -445,6 +496,7 @@ fuse_operations create_fuse_operations() {
   ops.fsyncdir = tri_fsyncdir;
 #if TRIBIOS_FUSE_API_VERSION >= 30
   ops.init = tri_init;
+  ops.destroy = tri_destroy;
 #endif
   return ops;
 }
@@ -469,6 +521,9 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
 #endif
 
   glb_project_manager = &manager;
+#if TRIBIOS_FUSE_API_VERSION >= 30
+  glb_mounted_view_root = mount_point;
+#endif
   std::error_code ec;
   std::filesystem::create_directories(mount_point, ec);
   if (ec) return error("cannot prepare mount point " + mount_point.string() + ": " + ec.message());
@@ -494,6 +549,40 @@ OutcomeVoid run_project_mount(ProjectManager& manager, const std::filesystem::pa
   glb_project_manager = nullptr;
   if (status != 0) return error("FUSE event loop exited with status " + std::to_string(status));
   return {};
+}
+
+void forget_kernel_cache_for_workspace_path(const std::string& workspace,
+                                            const std::string& relative_path, bool name_unlinked) {
+#if TRIBIOS_FUSE_API_VERSION >= 30
+  std::lock_guard lock(glb_mounted_fuse_mutex);
+  if (glb_mounted_fuse == nullptr) return;
+  const std::string relative = normalize_relative(relative_path);
+  const std::string view_path = "/" + workspace + (relative.empty() ? "" : "/" + relative);
+  const std::size_t slash = view_path.rfind('/');
+  const std::string parent_view_path = slash == 0 ? "/" : view_path.substr(0, slash);
+  const std::string name = view_path.substr(slash + 1);
+
+  // libfuse answers -ENOENT for a path the kernel has not looked up, and a
+  // parent the kernel has not looked up holds no cached entry for the name.
+  fuse_invalidate_path(glb_mounted_fuse, view_path.c_str());
+  if (fuse_invalidate_path(glb_mounted_fuse, parent_view_path.c_str()) != 0 || !name_unlinked) {
+    return;
+  }
+  // Only the stale name is dropped. Dropping a whole Workspace directory would
+  // also detach it from every shell whose working directory is inside it.
+  const auto parent_node =
+      kernel_node_id_for_view_directory(glb_mounted_view_root / parent_view_path.substr(1));
+  if (parent_node) {
+    fuse_lowlevel_notify_inval_entry(fuse_get_session(glb_mounted_fuse), *parent_node,
+                                     name.c_str(), name.size());
+  }
+#else
+  // macFUSE keeps the one-second default timeouts, which bound how long a
+  // change made outside the mount can stay hidden.
+  (void)workspace;
+  (void)relative_path;
+  (void)name_unlinked;
+#endif
 }
 
 void request_unmount(const std::filesystem::path& mount_point) {
