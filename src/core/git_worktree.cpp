@@ -7,6 +7,7 @@
 #include "core/paths.hpp"
 #include "core/proc.hpp"
 #include "core/recovery.hpp"
+#include "core/workspace_git_index.hpp"
 
 namespace tribios {
 namespace {
@@ -28,7 +29,8 @@ bool is_git_project(const std::filesystem::path& project_root) {
 Outcome<std::string> register_linked_worktree(const std::filesystem::path& project_root,
                                               const std::string& branch,
                                               const std::filesystem::path& workspace_path,
-                                              const std::filesystem::path& staging_dir) {
+                                              const std::filesystem::path& staging_dir,
+                                              const WorkspaceIndexSeed& seed) {
   std::error_code ec;
   std::filesystem::remove_all(staging_dir, ec);
   std::filesystem::create_directories(staging_dir.parent_path(), ec);
@@ -57,13 +59,11 @@ Outcome<std::string> register_linked_worktree(const std::filesystem::path& proje
 
   // `--no-checkout` also leaves the index empty, which would make Git report
   // every tracked file as staged-deleted. Fill the index from HEAD; the files
-  // themselves come from the Base state. An unborn HEAD has nothing to read.
-  if (run_process_and_capture_output(
-          {"git", "--git-dir", admin_dir.string(), "rev-parse", "--verify", "HEAD"})
-          .ok()) {
-    auto populated = run_process_and_capture_output(
-        {"git", "--git-dir", admin_dir.string(), "read-tree", "HEAD"});
-    if (!populated.ok()) return error("git read-tree failed: " + populated.output);
+  // themselves come from the Base state.
+  if (auto populated = populate_workspace_git_index(admin_dir, seed.tribios_dir, seed.base_dir,
+                                                    seed.inode_salt, seed.device);
+      !populated) {
+    return std::unexpected(populated.error());
   }
 
   for (const char* name : {"HEAD", "commondir", "gitdir", "index"}) {

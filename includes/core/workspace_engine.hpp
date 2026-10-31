@@ -35,6 +35,12 @@ struct DirEntry {
   mode_t mode = 0;
 };
 
+// Sibling Workspaces read the same Base-state files, so a backing inode alone
+// would report one file under several Workspace paths. Salting per Workspace
+// keeps each Workspace's inode numbers distinct and stable.
+std::uint64_t workspace_inode_salt(std::string_view workspace);
+std::uint64_t salted_workspace_inode(std::uint64_t salt, std::uint64_t backing_inode);
+
 // All filesystem behavior of one Workspace: an immutable Base tree plus a
 // sparse upper tree of this Workspace's own files, with tombstones marking
 // Base-state paths it removed. The FUSE callbacks are a thin adapter over
@@ -91,9 +97,6 @@ class WorkspaceEngine {
       const std::function<Status(const std::filesystem::path&)>& prepare_stage);
   Status remove_visible_entry_atomically(const std::string& kind,
                                          const std::string& relative, bool directory);
-  // Sibling Workspaces read the same Base-state files, so a backing inode alone
-  // would report one file under several Workspace paths. Salting per Workspace
-  // keeps each Workspace's inode numbers distinct and stable.
   std::uint64_t workspace_inode_for(const struct stat& backing) const;
 
   struct OpenHandle {
