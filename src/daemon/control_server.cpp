@@ -190,6 +190,11 @@ std::vector<std::string> ControlServer::dispatch_control_request(
   }
 
   if (verb == "shutdown") {
+    if (shutdown_unmount_) {
+      auto unmounted = shutdown_unmount_();
+      if (!unmounted) return error_reply(unmounted.error());
+      mount_active_.store(false);
+    }
     running_.store(false);
     return ok_reply({"stopping"});
   }
@@ -231,8 +236,8 @@ OutcomeVoid ControlServer::serve() {
       buffer.append(chunk, static_cast<std::size_t>(n));
     }
     const auto reply = encode_message(dispatch_control_request(decode_message(buffer)));
-    ssize_t written = ::write(client, reply.data(), reply.size());
-    (void)written;
+    // A client that disconnects before its reply loses only that reply.
+    send_whole_message(client, reply);
     ::close(client);
   }
   ::close(listen_fd_);
