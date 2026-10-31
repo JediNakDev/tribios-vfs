@@ -37,7 +37,8 @@ constexpr const char* kUsage =
     R"(tribios - persistent isolated development Workspaces
 
 usage:
-  tribios configure <project> [--mount <path>] [--force]
+  tribios configure <project> [--mount <path>] [--force] [--dry-run]
+  tribios check-ignore <path> [--project <path>]
   tribios info [--project <path>]
   tribios daemon start [--project <path>] [--no-mount]
   tribios daemon stop|status [--project <path>]
@@ -53,6 +54,11 @@ usage:
 behavior is reachable through the mounted Workspace path; the verbs exist so
 the test and benchmark harness can exercise identical semantics without a FUSE
 backend.
+
+`.tribiosignore` at the Project root excludes matching paths from the Base
+state that `configure` captures. `configure --dry-run` reports what a capture
+would include and exclude without writing anything, and `check-ignore` explains
+the decision for one Project-relative path.
 )";
 
 struct Options {
@@ -62,6 +68,7 @@ struct Options {
   std::string branch;
   bool force = false;
   bool no_mount = false;
+  bool dry_run = false;
 };
 
 Options parse_command_line(int argc, char** argv) {
@@ -78,6 +85,8 @@ Options parse_command_line(int argc, char** argv) {
       options.force = true;
     } else if (argument == "--no-mount") {
       options.no_mount = true;
+    } else if (argument == "--dry-run") {
+      options.dry_run = true;
     } else {
       options.positional.push_back(argument);
     }
@@ -186,9 +195,35 @@ OutcomeVoid wait_for_mount_to_close(const std::filesystem::path& mount_point,
   return error("the mount did not stop within the timeout");
 }
 
+void print_capture_exclusions(const tribios::CaptureStats& stats) {
+  for (const auto& exclusion : stats.exclusions) {
+    std::cout << "excluded " << exclusion.relative << (exclusion.directory ? "/" : "") << " ("
+              << exclusion.reason << ")\n";
+  }
+}
+
+// Runs the same walk as a real capture and writes nothing, so its decisions are
+// the ones `configure` would make for an unchanged Project.
+int command_configure_dry_run(const std::filesystem::path& root) {
+  const auto paths = tribios::ProjectPaths::from_project_root(root);
+  auto policy = tribios::CapturePolicy::load_from_project(paths.root);
+  if (!policy) return report_error(policy.error());
+  auto planned = tribios::plan_base_state_capture(paths.root, *policy);
+  if (!planned) return report_error(planned.error());
+  std::cout << "dry run: nothing was captured\n"
+            << "would capture: " << planned->entry_count << " entries, " << planned->bytes
+            << " bytes\n"
+            << "would exclude: " << planned->excluded_entry_count << " entries, "
+            << planned->excluded_bytes << " bytes\n";
+  print_capture_exclusions(*planned);
+  if (policy->has_patterns()) std::cerr << tribios::kCapturePolicyWarning << "\n";
+  return 0;
+}
+
 int command_configure(const Options& options) {
   if (options.positional.size() < 2) return report_error("configure needs a project directory");
   const std::filesystem::path root = std::filesystem::absolute(options.positional[1]);
+  if (options.dry_run) return command_configure_dry_run(root);
   auto captured = tribios::ProjectManager::configure(root, options.mount, options.force);
   if (!captured) return report_error(captured.error());
 
@@ -196,11 +231,42 @@ int command_configure(const Options& options) {
   std::cout << "configured " << paths.root << "\n"
             << "base state: " << captured->entry_count << " entries, " << captured->bytes
             << " bytes, captured in " << captured->duration_ms << " ms\n"
+            << "excluded by " << tribios::kCapturePolicyFileName << ": "
+            << captured->excluded_entry_count << " entries, " << captured->excluded_bytes
+            << " bytes, policy evaluated in " << captured->policy_evaluation_us / 1000
+            << " ms\n"
             << "mount point: "
             << (options.mount.empty() ? paths.mount_point.string()
                                       : std::filesystem::absolute(options.mount).string())
             << "\n";
+  print_capture_exclusions(*captured);
   std::cerr << tribios::kSecretsWarning << "\n";
+  if (!captured->exclusions.empty()) std::cerr << tribios::kCapturePolicyWarning << "\n";
+  return 0;
+}
+
+// Explains one path against the Project's current policy. It works before the
+// Project is configured, so a policy can be checked before the first capture.
+int command_check_ignore(const Options& options) {
+  if (options.positional.size() < 2) return report_error("check-ignore needs a path");
+  std::error_code ec;
+  auto configured = resolve_configured_project_root(options);
+  const std::filesystem::path root = tribios::ProjectPaths::from_project_root(
+      configured ? *configured : std::filesystem::current_path(ec)).root;
+  std::string relative = options.positional[1];
+  if (std::filesystem::path(relative).is_absolute()) {
+    const auto inside = std::filesystem::path(relative).lexically_relative(root);
+    if (inside.empty() || *inside.begin() == "..") {
+      return report_error(relative + " is outside the Project " + root.string());
+    }
+    relative = inside.string() + (relative.ends_with('/') ? "/" : "");
+  }
+  auto policy = tribios::CapturePolicy::load_from_project(root);
+  if (!policy) return report_error(policy.error());
+  auto explained = tribios::explain_capture_decision(root, *policy, relative);
+  if (!explained) return report_error(explained.error());
+  std::cout << (explained->excluded ? "excluded " : "included ")
+            << tribios::normalize_relative(relative) << " (" << explained->reason << ")\n";
   return 0;
 }
 
@@ -386,6 +452,7 @@ int main(int argc, char** argv) {
   }
   const std::string& command = options.positional[0];
   if (command == "configure") return command_configure(options);
+  if (command == "check-ignore") return command_check_ignore(options);
   if (command == "daemon") return command_daemon(options, argv[0]);
   if (command == "workspace") return command_workspace(options);
   if (command == "recovery") return command_recovery(options);
