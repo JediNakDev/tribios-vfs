@@ -48,6 +48,21 @@ TEST_CASE("wildcards never cross a path separator except as a whole ** segment")
   CHECK_FALSE(match_capture_glob("foo**", "foo/bar"));
 }
 
+TEST_CASE("repeated wildcards followed by a failing literal finish in polynomial time") {
+  std::string repeated_star_then_a;
+  for (int repeat = 0; repeat < 12; ++repeat) repeated_star_then_a += "*a";
+  const std::string only_a_characters(50, 'a');
+  CHECK_FALSE(match_capture_glob(repeated_star_then_a + "b", only_a_characters));
+  CHECK(match_capture_glob(repeated_star_then_a + "b", only_a_characters + "b"));
+
+  std::string repeated_directory_wildcards;
+  for (int repeat = 0; repeat < 12; ++repeat) repeated_directory_wildcards += "**/a*/";
+  std::string deep_path;
+  for (int repeat = 0; repeat < 30; ++repeat) deep_path += "aaa/";
+  CHECK_FALSE(match_capture_glob(repeated_directory_wildcards + "b", deep_path + "aaa"));
+  CHECK(match_capture_glob(repeated_directory_wildcards + "b", deep_path + "b"));
+}
+
 TEST_CASE("character classes support ranges, negation and a leading literal bracket") {
   CHECK(match_capture_glob("file[0-9].txt", "file7.txt"));
   CHECK_FALSE(match_capture_glob("file[0-9].txt", "filex.txt"));

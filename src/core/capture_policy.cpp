@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <vector>
 
 #include "core/paths.hpp"
 
@@ -158,9 +159,22 @@ std::string_view final_segment(std::string_view relative) {
 
 }  // namespace
 
-bool match_capture_glob(std::string_view glob, std::string_view text) {
-  std::size_t glob_index = 0;
-  std::size_t text_index = 0;
+namespace {
+
+// failed_states remembers (glob_index, text_index) pairs already proven not to match, which
+// bounds the work at one visit per pair instead of retrying every suffix at every '*'.
+bool match_capture_glob_from(std::string_view glob, std::string_view text,
+                             std::size_t glob_index, std::size_t text_index,
+                             std::vector<bool>& failed_states) {
+  const std::size_t state_index = glob_index * (text.size() + 1) + text_index;
+  if (failed_states[state_index]) return false;
+  const std::size_t starting_glob_index = glob_index;
+  const std::size_t starting_text_index = text_index;
+  const auto remember_failure = [&] {
+    failed_states[starting_glob_index * (text.size() + 1) + starting_text_index] = true;
+    return false;
+  };
+
   while (glob_index < glob.size()) {
     if (glob[glob_index] == '*') {
       std::size_t after_stars = glob_index;
@@ -170,42 +184,49 @@ bool match_capture_glob(std::string_view glob, std::string_view text) {
       if (after_stars - glob_index >= 2 && starts_segment && ends_segment) {
         if (after_stars == glob.size()) return true;
         // "**/" matches zero or more whole directories.
-        const std::string_view rest = glob.substr(after_stars + 1);
         for (std::size_t start = text_index;;) {
-          if (match_capture_glob(rest, text.substr(start))) return true;
+          if (match_capture_glob_from(glob, text, after_stars + 1, start, failed_states)) {
+            return true;
+          }
           const std::size_t slash = text.find('/', start);
-          if (slash == std::string_view::npos) return false;
+          if (slash == std::string_view::npos) return remember_failure();
           start = slash + 1;
         }
       }
-      const std::string_view rest = glob.substr(after_stars);
       for (std::size_t start = text_index; start <= text.size(); ++start) {
-        if (match_capture_glob(rest, text.substr(start))) return true;
-        if (start < text.size() && text[start] == '/') return false;
+        if (match_capture_glob_from(glob, text, after_stars, start, failed_states)) return true;
+        if (start < text.size() && text[start] == '/') break;
       }
-      return false;
+      return remember_failure();
     }
 
-    if (text_index >= text.size()) return false;
+    if (text_index >= text.size()) return remember_failure();
     const char current = text[text_index];
     if (glob[glob_index] == '?') {
-      if (current == '/') return false;
+      if (current == '/') return remember_failure();
       ++glob_index;
     } else if (glob[glob_index] == '[') {
       const std::size_t end = find_class_end(glob, glob_index);
       if (end == kNoClassEnd || current == '/' ||
           !class_matches(glob, glob_index, end, static_cast<unsigned char>(current))) {
-        return false;
+        return remember_failure();
       }
       glob_index = end;
     } else {
       if (glob[glob_index] == '\\') ++glob_index;
-      if (glob_index >= glob.size() || glob[glob_index] != current) return false;
+      if (glob_index >= glob.size() || glob[glob_index] != current) return remember_failure();
       ++glob_index;
     }
     ++text_index;
   }
-  return text_index == text.size();
+  return text_index == text.size() ? true : remember_failure();
+}
+
+}  // namespace
+
+bool match_capture_glob(std::string_view glob, std::string_view text) {
+  std::vector<bool> failed_states((glob.size() + 1) * (text.size() + 1), false);
+  return match_capture_glob_from(glob, text, 0, 0, failed_states);
 }
 
 Outcome<CapturePolicy> CapturePolicy::compile(std::string source) {
