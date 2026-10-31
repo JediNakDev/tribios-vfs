@@ -16,8 +16,8 @@ class ControlServer {
  public:
   // Told about each Workspace path a request changed without going through the
   // mount, so the mounted view can drop what the kernel cached for it. An empty
-  // path is the Workspace root. `name_unlinked` means the path no longer names
-  // what it named before the request.
+  // path is the Workspace root. `name_unlinked` means the path now names a
+  // different object, or none, than before the request.
   using ExternalChangeHandler = std::function<void(
       const std::string& workspace, const std::string& relative_path, bool name_unlinked)>;
 

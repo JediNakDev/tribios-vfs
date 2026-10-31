@@ -28,6 +28,20 @@ assert_eq "rewritten outside the mount" "$(cat docs/notes.txt)" "content after f
 assert_eq "$ws" "$(pwd -P)" "working directory after fs write"
 cd "$WORK"
 
+# Mutations that fail or change nothing keep every name alive, so the shell
+# working directory in docs stays reachable. The kernel marks the target of
+# /proc/self/cwd "(deleted)" once the directory's entry has been dropped.
+cd "$ws/docs"
+if tribios fs rmdir cached docs >/dev/null 2>&1; then fail "rmdir of a non-empty directory succeeded"; fi
+assert_eq "$ws/docs" "$(readlink /proc/self/cwd)" "working directory after a failed rmdir"
+tribios fs mv cached docs docs >/dev/null
+assert_eq "$ws/docs" "$(readlink /proc/self/cwd)" "working directory after a rename onto itself"
+if tribios fs mv cached docs src >/dev/null 2>&1; then fail "rename onto a non-empty directory succeeded"; fi
+assert_eq "$ws/docs" "$(readlink /proc/self/cwd)" "working directory after a failed rename onto a directory"
+if tribios fs rm cached docs >/dev/null 2>&1; then fail "rm of a directory succeeded"; fi
+assert_eq "$ws/docs" "$(readlink /proc/self/cwd)" "working directory after a failed rm"
+cd "$WORK"
+
 tribios fs chmod cached docs/list.txt 600 >/dev/null
 assert_eq 600 "$(file_mode "$ws/docs/list.txt")" "mode after fs chmod"
 
