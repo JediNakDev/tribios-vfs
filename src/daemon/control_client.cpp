@@ -29,9 +29,9 @@ Outcome<std::vector<std::string>> control_request(const std::filesystem::path& s
   }
 
   const std::string message = encode_message(request);
-  if (::write(fd, message.data(), message.size()) < 0) {
+  if (!send_whole_message(fd, message)) {
     ::close(fd);
-    return error("cannot send control request");
+    return error("the daemon closed the control connection before the request was sent");
   }
   ::shutdown(fd, SHUT_WR);
 
