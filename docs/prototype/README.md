@@ -225,8 +225,10 @@ Only a report with `state: complete` may decide issue #1.
 - No crash consistency is claimed if a process or machine is interrupted during
   an individual mutating operation. That work is specified in issue #2.
 - Renaming a Base-state directory materializes that subtree into the Workspace.
-- A removed Workspace stops answering immediately, but the kernel may keep its
-  cached directory entry until the mount's entry timeout expires.
+- On macOS, a change made outside the mount, such as removing a Workspace or a
+  `tribios fs` request, may stay hidden behind the kernel's cached entries and
+  attributes until the mount's one-second timeouts expire. On Linux the daemon
+  drops those cache entries itself (`docs/adr/0010-linux-kernel-cache.md`).
 - A Workspace keeps its branch when it is removed, so re-using the name later
   needs the branch dealt with first.
 - No Windows, FSKit, chunk-level deduplication, content addressing, compression
